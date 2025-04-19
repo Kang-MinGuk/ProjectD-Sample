@@ -1,0 +1,991 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Entity
+{
+    protected int uniqueId = 0;
+    protected EntityType entityType;
+    protected EntityResource entityRes;
+    protected EntityResource entityHorseRes;
+    protected Color color = Color.white;
+
+    protected H60InteractionData sourceData = new H60InteractionData();
+    protected H60InteractionData targetData = new H60InteractionData();
+    protected EntityDamageStuff damageStuff = new EntityDamageStuff();
+    protected List<EntityVE> virtualEffs = new List<EntityVE>();
+
+    protected bool enableRendering = true;
+    protected int sortingOrder = 0;         // rendering sorting order.
+    protected int heightOrder = 0;          // entity height order.
+    protected bool useHorseRes = false;     // 말을 탄 캐릭터 resource를 사용할 것인가?
+
+    protected bool immediateDestroy = false;
+    protected bool finish = false;
+
+    protected Entity parent;
+    protected List<Entity> childEntities = new List<Entity>();
+    protected List<H60SysBuff> childSysBuffEntities = new List<H60SysBuff>();
+    protected Dictionary<int, List<H60SysBuff>> dicSysBuffEntities = new Dictionary<int, List<H60SysBuff>>();
+
+    protected Vector3 cacheLocalPos = Vector3.zero;
+    protected Vector3 currScale = Vector3.one;
+    GameSpeedType speedType = GameSpeedType.X1;
+    protected bool elapsedGamePause = false;
+    protected float elapsedSaveSpineTimeScale = 1.0f;
+    protected float elapsedSaveEffectSpineTimeScale = 1.0f;
+    protected float prevGameSpeedWeightValue = 1.0f;
+
+    static H60Rect tempRect = new H60Rect(0.0f, 0.0f, 0.0f, 0.0f);
+    static H60Bound tempBound = new H60Bound(Vector3.zero, Vector2.zero);
+    static H60Bound tempBound2 = new H60Bound(Vector3.zero, Vector2.zero);
+
+    public Entity(int uniqueId, EntityType type)
+    {
+        this.uniqueId = uniqueId;
+        this.entityType = type;
+    }
+
+    //---------------------------------------------------
+    // Property.
+    #region ( Property. )
+
+    public int UniqueId
+    {
+        get { return uniqueId; }
+    }
+
+    public EntityType EntityType
+    {
+        get { return entityType; }
+    }
+
+    public EntityResource Resource
+    {
+        get
+        {
+            if (entityHorseRes == null) return entityRes;
+            return (useHorseRes == true) ? entityHorseRes : entityRes;
+        }
+    }
+
+    public H60InteractionData SourceData
+    {
+        get { return sourceData; }
+    }
+
+    public H60InteractionData TargetData
+    {
+        get { return targetData; }
+    }
+
+    public EntityDamageStuff DamageStuff
+    {
+        get { return damageStuff; }
+    }
+
+    public bool EnableRendering
+    {
+        get { return enableRendering; }
+    }
+
+    public int SortingOrder
+    {
+        get { return sortingOrder; }
+    }
+
+    public int HeightOrder
+    {
+        get { return heightOrder; }
+    }
+
+    public Entity Parent
+    {
+        set
+        {
+            if (parent != null)
+            {
+                if (entityRes != null && entityRes.obj != null)
+                {
+                    entityRes.obj.transform.parent = null;
+                }
+
+                if (parent.childEntities.Contains(this))
+                {
+                    parent.childEntities.Remove(this);
+                    parent.RemoveChildNotify(this);
+                    parent.RefreshSysBuff();
+                }
+
+                parent = null;
+            }
+
+            if (value != null)
+            {
+                if (entityRes != null && entityRes.obj != null &&
+                    value.entityRes != null && value.entityRes.obj != null)
+                {
+                    if (value.useHorseRes == true && value.entityHorseRes != null && value.entityHorseRes.obj != null)
+                    {
+                        entityRes.obj.transform.parent = value.entityHorseRes.obj.transform;
+                    }
+                    else
+                    {
+                        entityRes.obj.transform.parent = value.entityRes.obj.transform;
+                    }
+                }
+
+                parent = value;
+                value.childEntities.Add(this);
+                value.AddChildNotify(this);
+                parent.RefreshSysBuff();
+                RefreshSysBuff();
+            }
+        }
+        get
+        {
+            return parent;
+        }
+    }
+
+    public List<Entity> ChildEntities
+    {
+        get
+        {
+            return childEntities;
+        }
+    }
+
+    public bool isUseHorse
+    {
+        get
+        {
+            return useHorseRes;
+        }
+    }
+
+    #endregion
+
+    //---------------------------------------------------
+    // Private Function.
+    #region ( Private Funtion. )
+
+    void ClearDicSysBuff()
+    {
+        var e = dicSysBuffEntities.GetEnumerator();
+        while (e.MoveNext())
+        {
+            e.Current.Value.Clear();
+        }
+    }
+
+    #endregion
+
+
+
+    //---------------------------------------------------
+    // Public Function.
+    #region ( Public Funtion. )
+
+    public virtual void Enter()
+    {
+        color = Color.white;
+    }
+
+    public virtual void Exit()
+    {
+        if (Parent != null)
+        {
+            Parent = null;
+        }
+
+        for (int i = childEntities.Count - 1; i >= 0; i--)
+        {
+            childEntities[i].finish = true;
+            childEntities[i].parent = null;
+        }
+        childEntities.Clear();
+
+        childSysBuffEntities.Clear();
+        dicSysBuffEntities.Clear();
+
+        ReleaseResource();
+    }
+
+    public virtual void ReleaseResource()
+    {
+        if (H60ResourcePool.Verify() && entityRes != null)
+        {
+            H60ResourcePool.Instant.ReleaseResource(entityRes);
+            entityRes = null;
+
+            if (entityHorseRes != null)
+            {
+                H60ResourcePool.Instant.ReleaseResource(entityHorseRes);
+                entityHorseRes = null;
+            }
+        }
+    }
+
+    public virtual void UpdateGamePauseAndSpeed(float fElasped, GameSpeedType xSpeed, float finalGameSpeedValue)
+    {
+        if (fElasped == 0.0f)
+        {
+            if (elapsedGamePause == false)
+            {
+                if (entityRes != null && entityRes.monoEffect != null)
+                    entityRes.monoEffect.SetTimeScale((float)GameSpeedType.Pause);
+
+                if (entityRes != null)
+                {
+                    if (entityRes.monoSpine != null)
+                    {
+                        elapsedSaveSpineTimeScale = entityRes.monoSpine.GetAnimTimeScale();
+                        entityRes.monoSpine.SetAnimTimeScale(0.0f);
+                    }
+
+                    if (entityRes.monoEffect != null && entityRes.monoEffect.monoSpine != null)
+                    {
+                        elapsedSaveEffectSpineTimeScale = entityRes.monoEffect.monoSpine.GetAnimTimeScale();
+                        entityRes.monoEffect.monoSpine.SetAnimTimeScale(0.0f);
+                    }
+                }
+
+                if (entityHorseRes != null && entityHorseRes.monoEffect != null)
+                    entityHorseRes.monoEffect.SetTimeScale((float)GameSpeedType.Pause);
+
+                if (entityHorseRes != null)
+                {
+                    if (entityHorseRes.monoSpine != null)
+                    {
+                        elapsedSaveSpineTimeScale = entityHorseRes.monoSpine.GetAnimTimeScale();
+                        entityHorseRes.monoSpine.SetAnimTimeScale(0.0f);
+                    }
+
+                    if (entityHorseRes.monoEffect != null && entityHorseRes.monoEffect.monoSpine != null)
+                    {
+                        elapsedSaveEffectSpineTimeScale = entityHorseRes.monoEffect.monoSpine.GetAnimTimeScale();
+                        entityHorseRes.monoEffect.monoSpine.SetAnimTimeScale(0.0f);
+                    }
+                }
+
+                elapsedGamePause = true;
+            }
+        }
+        else
+        {
+            // 요기는 performanc 최적화 한다.
+            float adjustTimeScale = finalGameSpeedValue * H60PAM.Instant.GetMBDefaultAnimSpeedRatio();
+            if (prevGameSpeedWeightValue != adjustTimeScale)
+            {
+                if (entityRes != null && entityRes.monoEffect != null)
+                {
+                    entityRes.monoEffect.SetTimeScale(adjustTimeScale);
+                }
+
+                if (entityHorseRes != null && entityHorseRes.monoEffect != null)
+                {
+                    entityHorseRes.monoEffect.SetTimeScale(adjustTimeScale);
+                }
+
+                prevGameSpeedWeightValue = adjustTimeScale;
+            }
+
+            if (elapsedGamePause || speedType != xSpeed)
+            {
+                speedType = xSpeed;
+            }
+
+            if (elapsedGamePause)
+            {
+                if (entityRes != null && entityRes.monoSpine != null)
+                    entityRes.monoSpine.SetAnimTimeScale(elapsedSaveSpineTimeScale);
+                if (entityHorseRes != null && entityHorseRes.monoSpine != null)
+                    entityHorseRes.monoSpine.SetAnimTimeScale(elapsedSaveSpineTimeScale);
+
+                if (entityRes != null && entityRes.monoEffect != null)
+                    entityRes.monoEffect.SetTimeScale(elapsedSaveSpineTimeScale);
+                if (entityHorseRes != null && entityHorseRes.monoEffect != null)
+                    entityHorseRes.monoEffect.SetTimeScale(elapsedSaveSpineTimeScale);
+
+                if (entityRes != null && entityRes.monoEffect != null && entityRes.monoEffect.monoSpine != null)
+                    entityRes.monoEffect.monoSpine.SetAnimTimeScale(elapsedSaveEffectSpineTimeScale);
+                if (entityHorseRes != null && entityHorseRes.monoEffect != null && entityHorseRes.monoEffect.monoSpine != null)
+                    entityHorseRes.monoEffect.monoSpine.SetAnimTimeScale(elapsedSaveEffectSpineTimeScale);
+            }
+
+            elapsedGamePause = false;
+        }
+    }
+
+    public void RefreshSysBuff()
+    {
+        ClearDicSysBuff();
+        childSysBuffEntities.Clear();
+
+        H60SysBuff sysBuff;
+        int sysTypeIndex;
+
+        for (int i = 0; i < childEntities.Count; i++)
+        {
+            if (childEntities[i].EntityType != EntityType.SysBuff)
+                continue;
+
+            sysBuff = (H60SysBuff)childEntities[i];
+
+            childSysBuffEntities.Add(sysBuff);
+
+            sysTypeIndex = (int)sysBuff.SysBuffAttr.tableSysEff.SysType;
+            if (dicSysBuffEntities.ContainsKey(sysTypeIndex) == false)
+            {
+                dicSysBuffEntities.Add(sysTypeIndex, new List<H60SysBuff>());
+            }
+            dicSysBuffEntities[sysTypeIndex].Add(sysBuff);
+        }
+
+        // sorting order를 정한다.
+        if (childSysBuffEntities.Count > 0)
+        {
+            for (int i = 0; i < childSysBuffEntities.Count; i++)
+            {
+                childSysBuffEntities[i].SysBuffAttr.groupSeqCount = childSysBuffEntities.Count;
+                childSysBuffEntities[i].SysBuffAttr.groupSeqOrder = childSysBuffEntities.Count - i - 1;
+            }
+        }
+    }
+
+    public virtual void UpdateFrame(float fElasped, GameSpeedType xSpeed, float finalGameSpeedValue)
+    {
+        UpdateGamePauseAndSpeed(fElasped, xSpeed, finalGameSpeedValue);
+
+        RefreshSysBuff();
+
+        for (int i = virtualEffs.Count - 1; i >= 0; i--)
+        {
+            virtualEffs[i].UpdateFrame(fElasped, xSpeed);
+            if (virtualEffs[i].isFinish())
+            {
+                virtualEffs.RemoveAt(i);
+            }
+        }
+    }
+
+    public virtual void RemoveChildAll()
+    {
+        for (int i = childEntities.Count - 1; i >= 0; i--)
+        {
+            childEntities[i].finish = true;
+            childEntities[i].parent = null;
+        }
+        childEntities.Clear();
+
+        RefreshSysBuff();
+    }
+
+    public virtual void Finish()
+    {
+        finish = true;
+    }
+
+    public virtual bool isFinish()
+    {
+        return finish;
+    }
+
+
+    #endregion
+
+    //---------------------------------------------------
+    // Public Function.
+    #region ( Public Function. )
+
+    public virtual Entity GetOwnerEntity()
+    {
+        return sourceData.Entity;
+    }
+
+    protected void Render(EntityResource inRes, bool enable)
+    {
+        if (inRes == null)
+            return;
+
+        if (inRes.obj != null)
+            inRes.obj.SetActive(enable);
+
+        if (inRes.monoProjectile != null)
+            inRes.monoProjectile.gameObject.SetActive(enable);
+
+        if (inRes.monoEffect != null)
+            inRes.monoEffect.gameObject.SetActive(enable);
+    }
+
+    public virtual void UseHorseResource(bool useHorse)
+    {
+        useHorseRes = useHorse;
+
+        if (useHorseRes == true && entityHorseRes == null)
+            return;
+
+        if (useHorse)
+        {
+            Render(entityRes, false);
+            Render(entityHorseRes, true);
+        }
+        else
+        {
+            Render(entityHorseRes, false);
+            Render(entityRes, true);
+        }
+    }
+
+    public virtual void Render(bool enable, bool forceApply = false)
+    {
+        if (forceApply == false && enableRendering == enable)
+            return;
+
+        enableRendering = enable;
+
+        Render(entityRes, enableRendering);
+        Render(entityHorseRes, enableRendering);
+    }
+
+    protected void SetSortingOrder(EntityResource inRes, int order)
+    {
+        if (inRes == null)
+            return;
+
+        if (inRes.spriteRenderer != null)
+            inRes.spriteRenderer.sortingOrder = order;
+
+        if (inRes.monoSpine != null)
+            inRes.monoSpine.SetSortingOrder(order);
+
+        if (inRes.monoProjectile != null)
+            inRes.monoProjectile.SetSortingOrder(order);
+
+        if (inRes.monoEffect != null)
+            inRes.monoEffect.SetSortingOrder(order);
+    }
+
+    public virtual void SetSortingOrder(int order)
+    {
+        if (sortingOrder == order)
+            return;
+
+        sortingOrder = order;
+
+        SetSortingOrder(entityRes, order);
+        SetSortingOrder(entityHorseRes, order);
+    }
+
+    public virtual void SetHeightOrder(int order)
+    {
+        heightOrder = order;
+    }
+
+    public virtual void SetScale(float scale)
+    {
+        currScale = new Vector3(scale, scale, scale);
+
+        if (entityRes != null && entityRes.obj != null)
+        {
+            entityRes.obj.transform.localScale = currScale;
+        }
+
+        if (entityHorseRes != null && entityHorseRes.obj != null)
+        {
+            entityHorseRes.obj.transform.localScale = currScale;
+        }
+
+        if (childEntities.Count > 0)
+        {
+            for (int i = 0; i < childEntities.Count; i++)
+                childEntities[i].ParentScaleChangeNotify();
+        }
+    }
+
+    public virtual void SetScale(Vector3 scale)
+    {
+        currScale = scale;
+
+        if (entityRes != null && entityRes.obj != null)
+        {
+            entityRes.obj.transform.localScale = currScale;
+        }
+
+        if (entityHorseRes != null && entityHorseRes.obj != null)
+        {
+            entityHorseRes.obj.transform.localScale = currScale;
+        }
+    }
+
+    public virtual Vector3 GetScale()
+    {
+        return currScale;
+    }
+
+    public virtual void SetPosition(Vector3 localPos)
+    {
+        if (float.IsNaN(localPos.y))
+        {
+            return;
+        }
+
+        if (entityRes != null && entityRes.obj != null)
+            entityRes.obj.transform.localPosition = localPos;
+
+        if (entityHorseRes != null && entityHorseRes.obj != null)
+            entityHorseRes.obj.transform.localPosition = localPos;
+
+        cacheLocalPos = localPos;
+    }
+
+    public virtual Vector3 GetPosition()
+    {
+        if (isDie() == false)
+        {
+            if (entityRes != null && entityRes.obj != null)
+                return entityRes.obj.transform.localPosition;
+
+            return cacheLocalPos;
+        }
+        else
+        {
+            return cacheLocalPos;
+        }
+    }
+
+    public virtual Vector3 GetFlyOverPosition()
+    {
+        return Vector3.zero;
+    }
+
+    public virtual void SetDirectionPosition(Vector3 localPos)
+    {
+
+    }
+
+    public virtual void SetDir(Vector3 dir)
+    {
+        if (entityRes != null && entityRes.obj != null)
+            entityRes.obj.transform.right = dir;
+
+        if (entityHorseRes != null && entityHorseRes.obj != null)
+            entityHorseRes.obj.transform.right = dir;
+    }
+
+    public virtual void SetAlpha(float alpha)
+    {
+        if (entityRes != null && entityRes.monoSpine != null)
+            entityRes.monoSpine.SetAlpha(alpha);
+
+        if (entityHorseRes != null && entityHorseRes.monoSpine != null)
+            entityHorseRes.monoSpine.SetAlpha(alpha);
+
+        if (entityRes != null && entityRes.spriteRenderer != null)
+            entityRes.spriteRenderer.color = color;
+
+        if (entityRes != null && entityRes.tex != null)
+            entityRes.tex.color = color;
+    }
+
+    public virtual void SetLeftToRight(bool leftToRight)
+    {
+    }
+
+    public virtual bool isLeftToRight()
+    {
+        return true;
+    }
+
+    protected Vector3 GetCenterPosition(EntityResource InRes)
+    {
+        if (isDie() == false)
+        {
+            if (InRes != null && InRes.obj != null)
+            {
+                Vector3 vHeight = Vector3.zero;
+
+                if (InRes.monoSpine != null)
+                {
+                    Vector3 vRootBone = InRes.monoSpine.GetBonePosition(EntityDefine.CHAR_SPINE_BONE_ROOT);
+                    //애니메이션으로 높이를 가지는 본 
+                    Vector3 vAnimationBone = InRes.monoSpine.GetBonePosition(EntityDefine.CHAR_SPINE_BONE_ANIMATION);
+                    //기준보다 낮아질 때가 있으므로,
+                    float fHeight = (vAnimationBone.y - vRootBone.y) > 0 ? (vAnimationBone.y - vRootBone.y) : 0;
+                    vHeight.y = fHeight;
+                }
+
+                return InRes.obj.transform.localPosition + vHeight;
+            }
+
+            return cacheLocalPos;
+        }
+        else
+        {
+            return cacheLocalPos;
+        }
+    }
+
+    public virtual Vector3 GetCenterPosition()
+    {
+        return GetCenterPosition(Resource);
+    }
+
+    protected Vector3 GetTopPosition(EntityResource InRes)
+    {
+        if (InRes != null && InRes.obj != null)
+            return InRes.obj.transform.localPosition;
+
+        return cacheLocalPos;
+    }
+
+    public virtual Vector3 GetTopPosition()
+    {
+        return GetTopPosition(Resource);
+    }
+
+    public virtual Vector3 GetMonoEffectPosition(H60MonoEffect monoEffect, bool applyScale = true)
+    {
+        Vector3 entityPos = GetPosition();
+        if (monoEffect == null)
+            return entityPos;
+
+        Vector3 bodySize = Vector3.zero;
+        if (Resource != null)
+        {
+            bodySize = GetBodySize(applyScale);
+        }
+
+        Vector3 showOffset = monoEffect.GetScaledShowOffset();
+
+        if (monoEffect.showAttach == H60MonoEffect.ShowAttach.World)
+        {
+            if (monoEffect.showPosition == H60MonoEffect.ShowPosition.Top)
+            {
+                entityPos.y += showOffset.y + bodySize.y;
+            }
+            else if (monoEffect.showPosition == H60MonoEffect.ShowPosition.Center)
+            {
+                entityPos.y += showOffset.y + bodySize.y / 2.0f;
+            }
+            else
+            {
+                entityPos.y += showOffset.y;
+            }
+        }
+        else
+        {
+            if (string.IsNullOrEmpty(monoEffect.showBone) == false)
+            {
+                entityPos = GetBonePosition(monoEffect.showBone);
+            }
+
+            entityPos.y += showOffset.y;
+        }
+
+        if (isLeftToRight())
+        {
+            entityPos.x += showOffset.x;
+        }
+        else
+        {
+            entityPos.x -= showOffset.x;
+        }
+
+        if (monoEffect.showRandomArea)
+        {
+            Vector3 randomArea = monoEffect.GetScaledShowRandomArea();
+            entityPos.x += Random.Range(-randomArea.x / 2.0f, randomArea.x / 2.0f);
+            entityPos.y += Random.Range(-randomArea.y / 2.0f, randomArea.y / 2.0f);
+        }
+
+        return entityPos;
+    }
+
+    public virtual Vector2 GetBodySize(bool applyScale = true)
+    {
+        return Vector2.zero;
+    }
+
+    public virtual Vector3 GetBonePosition(string boneName)
+    {
+        return Vector3.zero;
+    }
+
+    public virtual float GetDistanceBodyExclude(Entity h60Target, H60BattleType type)
+    {
+        bool body3DCheck = false;
+        if (type == H60BattleType.DGodBattle)
+        {
+            if (isAirEntity() == false && h60Target.isAirEntity() == false)
+                body3DCheck = true;
+        }
+
+        if (body3DCheck)
+        {
+            Vector3 sourcePosition = GetPosition();
+            Vector3 targetPosition = h60Target.GetPosition();
+            Vector2 sourceBodySize = GetBodySize();
+            Vector2 targetBodySize = h60Target.GetBodySize();
+
+            float bodySourceHalfW = sourceBodySize.x / 2.0f;
+            float bodyTargetHalfW = targetBodySize.x / 2.0f;
+
+            float subDistance = Vector3.Distance(targetPosition, sourcePosition) - (bodySourceHalfW + bodyTargetHalfW);
+            if (subDistance <= 0f)
+                subDistance = 1f;
+
+            return Mathf.Abs(subDistance);
+        }
+        else
+        {
+            Vector3 sourcePositon = GetPosition();
+            Vector3 targetPosition = h60Target.GetPosition();
+            Vector2 sourceBodySize = GetBodySize();
+            Vector2 targetBodySize = h60Target.GetBodySize();
+
+            float bodySourceHalfW = sourceBodySize.x / 2.0f;
+            float bodyTargetHalfW = targetBodySize.x / 2.0f;
+
+            float subDistance = Mathf.Abs(targetPosition.x - sourcePositon.x) - (bodySourceHalfW + bodyTargetHalfW);
+            if (subDistance <= 0f)
+                subDistance = 1f;
+
+            return Mathf.Abs(subDistance);
+        }
+    }
+
+    public virtual float GetDistanceBodyExcludeXY(Entity h60Target)
+    {
+        float subDistance = 10000f;
+        if (h60Target != null)
+        {
+            Vector3 sourcePosition = GetPosition();
+            Vector3 targetPosition = h60Target.GetPosition();
+            Vector2 sourceBodySize = GetBodySize();
+            Vector2 targetBodySize = h60Target.GetBodySize();
+
+            float bodySourceHalfW = sourceBodySize.x / 2.0f;
+            float bodyTargetHalfW = targetBodySize.x / 2.0f;
+
+            subDistance = Vector3.Distance(targetPosition, sourcePosition) - (bodySourceHalfW + bodyTargetHalfW);
+        }
+        return subDistance;
+    }
+
+    public virtual void SetAimBoneDir(Vector3 dir)
+    {
+    }
+
+    public virtual bool isAirEntity()
+    {
+        return false;
+    }
+
+    public virtual bool isCollision(Vector3 colliPos, float radius)
+    {
+        Vector3 centerPos = GetCenterPosition();
+        Vector2 bodySize = GetBodySize();
+
+        tempBound.Set(centerPos, bodySize);
+        tempRect.Set(colliPos, radius);
+        tempBound2.Set(tempRect);
+
+        return H60Bound.Collision(tempBound, tempBound2);
+    }
+
+    public virtual bool isCollision(H60Rect colliRect)
+    {
+        Vector3 centerPos = GetCenterPosition();
+        Vector2 bodySize = GetBodySize();
+
+        tempBound.Set(centerPos, bodySize);
+        tempBound2.Set(colliRect);
+
+        return H60Bound.Collision(tempBound, tempBound2);
+    }
+
+    public virtual bool isCollision(Vector3 colliPos, Vector2 size)
+    {
+        Vector3 centerPos = GetCenterPosition();
+        Vector2 bodySize = GetBodySize();
+
+        tempBound.Set(centerPos, bodySize);
+        tempRect.Set(colliPos, size);
+        tempBound2.Set(tempRect);
+
+        return H60Bound.Collision(tempBound, tempBound2);
+    }
+
+    public virtual bool isCanGetBuff()
+    {
+        return false;
+    }
+
+    public virtual bool isDie()
+    {
+        return false;
+    }
+
+    public virtual bool isDelete()
+    {
+        return false;
+    }
+
+    public virtual EntityState GetState()
+    {
+        return EntityState.None;
+    }
+
+    public void ReleaseSysEffect(BS_DATA.SysEffectType type)
+    {
+        if (childEntities.Count == 0)
+            return;
+
+        for (int i = 0; i < childEntities.Count; i++)
+        {
+            if (childEntities[i].EntityType != EntityType.SysBuff)
+                continue;
+
+            H60SysBuff h60Buff = (H60SysBuff)childEntities[i];
+            if (h60Buff.SysBuffAttr.tableSysEff.SysType == type)
+                h60Buff.Finish();
+        }
+
+        RefreshSysBuff();
+    }
+
+    public void ReleaseSysEffectAll()
+    {
+        if (childEntities.Count == 0)
+            return;
+
+        for (int i = 0; i < childEntities.Count; i++)
+        {
+            if (childEntities[i].EntityType != EntityType.SysBuff)
+                continue;
+
+            childEntities[i].Finish();
+        }
+
+        RefreshSysBuff();
+    }
+
+    public List<H60SysBuff> GetSysEffectAll()
+    {
+        return childSysBuffEntities;
+    }
+
+    public List<H60SysBuff> GetSysEffect(BS_DATA.SysEffectType type)
+    {
+        if (childSysBuffEntities.Count == 0)
+            return null;
+
+        int sysTypeIndex = (int)type;
+        if (dicSysBuffEntities.ContainsKey(sysTypeIndex) == false)
+            return null;
+
+        if (dicSysBuffEntities[sysTypeIndex].Count == 0)
+            return null;
+
+        return dicSysBuffEntities[sysTypeIndex];
+    }
+
+    public bool isExistSysEffect(BS_DATA.SysEffectType type, int seqAttackUniqueId)
+    {
+        if (childEntities.Count == 0)
+            return false;
+
+        for (int i = 0; i < childEntities.Count; i++)
+        {
+            if (childEntities[i].EntityType != EntityType.SysBuff)
+                continue;
+
+            H60SysBuff h60Buff = (H60SysBuff)childEntities[i];
+            if (h60Buff.SysBuffAttr.tableSysEff.SysType == type && h60Buff.SeqAttackUniqueId == seqAttackUniqueId)
+                return true;
+        }
+
+        return false;
+    }
+
+    #endregion
+
+    //---------------------------------------------------
+    // Action Funtion.
+    #region ( Action Funtion. )
+
+    public virtual void AddChildNotify(Entity child)
+    {
+    }
+
+    public virtual void RemoveChildNotify(Entity child)
+    {
+    }
+
+    public virtual void RefreshChildNotify(Entity child)
+    {
+
+    }
+
+    public virtual void ParentScaleChangeNotify()
+    {
+
+    }
+
+    public virtual void ActionKnockbackNotify(bool leftToRight, float lifeTime)
+    {
+    }
+
+    public virtual void ActionDamage(Entity sourceEntity, EntityDamageStuff damageStuff, LONGDOUBLE decDamage)
+    {
+    }
+
+    public virtual void ActionDamageOfTime(LONGDOUBLE decDamage)
+    {
+
+    }
+
+    public virtual void ActionReflectDamage(LONGDOUBLE decDamage)
+    {
+    }
+
+    public virtual void ActionHeal(LONGDOUBLE healValue)
+    {
+    }
+
+    public virtual void ActionDotHeal(LONGDOUBLE healValue)
+    {
+
+    }
+
+    public virtual void ActionAddHP(LONGDOUBLE percentValue)
+    {
+    }
+
+    public virtual void ActionDecHPPercent(double precent)
+    {
+
+    }
+
+    #endregion
+
+    //---------------------------------------------------
+    // Virtual Effect Funtion.
+    #region ( Virtual Effect Funtion. )
+
+    public void AddFadeIn(float lifeTime)
+    {
+        EntityVEFadeInOut ve = new EntityVEFadeInOut(this, EntityVEFadeInOut.FadeInOutType.FadeIn, lifeTime);
+        virtualEffs.Add(ve);
+    }
+
+    public void AddFadeOut(float lifeTime)
+    {
+        EntityVEFadeInOut ve = new EntityVEFadeInOut(this, EntityVEFadeInOut.FadeInOutType.FadeOut, lifeTime);
+        virtualEffs.Add(ve);
+    }
+
+    #endregion
+}
