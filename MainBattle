@@ -1,0 +1,1263 @@
+using System.Collections.Generic;
+using UnityEngine;
+using Spine;
+using Spine.Unity;
+using XGuard;
+
+public class BattleScene : MonoBehaviour
+{
+    [Header("Root")]
+    public Transform objRoot;
+    public TweenPosition twpRoot;
+
+    [Header("Characters")]
+    public GameObject objCharLayer;
+    public GameObject objWeaponLayer;
+
+    [Header("Behavior")]
+    public GameObject objBehaviorLayer;
+
+    [Header("Shadow")]
+    public GameObject objShadowLayer;
+
+    [Header("CutIn")]
+    public GameObject objCutInLayer;
+
+    [Header("BG")]
+    public LayeredBackgroundManager layerdBackgroundManager;
+    public UITexture staticBackground;
+
+    [Header("TimeStone")]
+    public GameObject MyGate00;
+    public GameObject EnemyGate01;
+    public GameObject EnemyGate02;
+    public GameObject EnemyGate03;
+    public GameObject EnemyGate04;
+    public GameObject EnemyGate05;
+    public GameObject EnemyGate06;
+    public GameObject EnemyGate07;
+    public GameObject EnemyGate08;
+    public GameObject EnemyGate09;
+    public GameObject EnemyGate10;
+    public GameObject EnemyGate11;
+    public GameObject EnemyGate12;
+
+    [Header("SkillDirection")]
+    public GameObject objSkillDirectionLayer;
+    public SpriteRenderer skillSpriteRender;
+
+    //---------------------------------------------------
+    // Variables.
+
+    #region ( Variables. )
+
+    public const float WORLD_CENTER_Y = -120.0f;
+
+    private MBattleH60CharGroup group = new MBattleH60CharGroup();
+    private MBSceneState sceneState = MBSceneState.Entry;
+    private H60MBResult result = H60MBResult.Win;
+
+    private Vector3 oriRootPos = Vector3.zero;
+    private bool isAdjustPos = false;
+    private float cameraMoveDeltaX = 0.0f;
+    private Vector3 cameraFinalPos;
+
+    private H60WorldTarget cameraWorldTarget = null;
+    private Vector3 cameraWorldPos = Vector3.zero;
+
+    private Vector3 tempPos = Vector3.zero;
+
+    private H60GameModel gameModel;
+    private H60CharacterModel charModel;
+
+    public ElapsedTimer BattleTransitionTimer = new ElapsedTimer();
+    public ElapsedTimer OutDirectionTimer = new ElapsedTimer();
+
+    private float unloadResourceTime = 0.0f;
+    private float assistSkillCheckTime = 0.0f;
+
+    // 메모리 부족
+    private bool mIsLowMemory = false;
+
+    /// <summary>
+    /// 진입 버튼으로 보스전 들어가기
+    /// </summary>
+    private int onClickEnterBossStage = 0;
+
+    //카메라 이동용 변수
+    private float farCharPosX = 0f;
+    private float rootFarCharPosX = 0f;
+    private float movePercent = 0f;
+    private double fastSpeed = 1f;
+    private float fastSpeedRatio = 1.0f;
+    //--
+
+    //카메라 이동용 상수
+    private float spawnCharPosX = 0f;
+    private float baseInterX = 0;
+    private float maxFarValue = float.MinValue;
+
+    #endregion ( Variables. )
+
+    //---------------------------------------------------
+    // Property.
+
+    #region ( Property. )
+
+    private static MBattleScene _instant = null;
+
+    public static MBattleScene Instant { get { return _instant; } }
+
+    public MBattleH60CharGroup Group { get { return group; } }
+
+    public MBSceneState SceneState { get { return sceneState; } }
+
+    #endregion ( Property. )
+
+    //---------------------------------------------------
+    // Unity Funtion.
+
+    #region ( Unity Funtion. )
+
+    private void Awake()
+    {
+        _instant = this;
+
+        UIPanel panelWeapon = objWeaponLayer.GetComponent<UIPanel>();
+        if (panelWeapon != null)
+        {
+            panelWeapon.sortingOrder = 50;
+        }
+
+        gameModel = H60ModelManager.Instant.mlGame;
+        charModel = H60ModelManager.Instant.mlCharacter;
+
+        //메모리 부족 이벤트
+        Application.lowMemory += OnLowMemory;
+
+        PreloadBG();
+        layerdBackgroundManager.Initialize();
+
+        if (NetworkSession.Verify())
+        {
+            NetworkSession.Instant.Event.rs_goto_boss_stage_event += ReceiveEvent_EnterBossStage;
+
+            H60UIActionManager.Instant.character_change_state_func_enter += OnEventCharacterChangeStateFuncEnter;
+            H60UIActionManager.Instant.character_skill_enter += OnEventCharacterSkillEnter;
+            H60UIActionManager.Instant.character_skill_exit += OnEventCharacterSkillExit;
+            H60UIActionManager.Instant.character_skill_action += OnEventCharacterSkillAction;
+            H60UIActionManager.Instant.die_action += OnEventCharacterDeath;
+
+            H60ModelManager.Instant.mlGame.EventUnionMussangActive += OnEventUnionMussangActive;
+            H60ModelManager.Instant.mlGame.EventUnionMussangDeActive += OnEventUnionMussangDeActive;
+        }
+
+        group.Awake();
+    }
+
+    private void Start()
+    {
+        H60BattleDirection.Instant.MB_AssignObject(objSkillDirectionLayer, skillSpriteRender);
+
+        oriRootPos = objRoot.localPosition;
+
+        //변하지 않는 값
+        spawnCharPosX = group.GetSpawnPositionX();
+        baseInterX = Mathf.Abs(spawnCharPosX);
+
+        //2:1 기준 우측 게이트 카메라 좌표 한계
+        maxFarValue = -630f;
+        if (RatioScaleCalculator.GetScale().x > 1)
+        {
+            switch (ScreenDevice.RatioType)
+            {
+                case ScreenDevice.RatioTypes.r4x3:
+                    maxFarValue = maxFarValue / (RatioScaleCalculator.GetScale().x * 0.71f);
+                    break;
+
+                default:
+                    maxFarValue = maxFarValue / (RatioScaleCalculator.GetScale().x);
+                    break;
+            }
+        }
+        else if (RatioScaleCalculator.GetScale().x < 1)
+        {
+            maxFarValue = maxFarValue / (RatioScaleCalculator.GetScale().x * 1.015f);
+        }
+        //--
+
+        // 스케일 재조정.
+        // transform.localScale = new Vector3(0.95f, 0.95f, 0.95f);
+
+        cameraWorldTarget = new H60WorldTarget(H60EntityManager.Instant.AcquireUniqueId(), H60EntityType.WorldTarget);
+
+        Enter();
+    }
+
+    // Update is called once per frame
+    private void Update()
+    {
+        // 사용하지 않는 resource time update...
+        unloadResourceTime += Time.deltaTime;
+        GameSpeedType xSpeed = gameModel.GetGameSpeedTypeOnOff();
+        float xSpeedValue = gameModel.GetFinalGameSpeedDefaultWeightValue();
+
+        float fElapsed = Time.deltaTime * xSpeedValue;
+
+        if (gameModel.MainBattlePause)
+        {
+            fElapsed = 0.0f;
+            xSpeed = GameSpeedType.Pause;
+        }
+
+        if (cameraWorldTarget != null)
+        {
+            cameraWorldTarget.SetPosition(GetBattleCenterPos());
+        }
+
+        switch (sceneState)
+        {
+            case MBSceneState.BattleIn:
+                UpdateBattleInState(fElapsed, xSpeed, xSpeedValue);
+                break;
+
+            case MBSceneState.Battle:
+                UpdateBattleState(fElapsed, xSpeed, xSpeedValue);
+                break;
+
+            case MBSceneState.BattleOutDirection:
+                UpdateBattleOutDirection(fElapsed, xSpeed, xSpeedValue);
+                break;
+
+            case MBSceneState.BattleOut:
+                UpdateBattleOut(fElapsed, xSpeed, xSpeedValue);
+                break;
+        }
+
+        H60BattleDirection.Instant.UpdateFrame(fElapsed);
+    }
+
+    private void OnDestroy()
+    {
+        Application.lowMemory -= OnLowMemory;
+
+        _instant = null;
+    }
+
+    #endregion ( Unity Funtion. )
+
+    //---------------------------------------------------
+    // Event Funtion.
+
+    #region ( Event Funtion. )
+
+    public void OnEventCameraAdjustPosFinish()
+    {
+        isAdjustPos = false;
+    }
+
+    private SimpleTimer MemoryWarningTimer = new SimpleTimer();
+
+    /// <summary>
+    /// iOS, Android 기기에서 앱이 포그라운드에서 실행되는 동안 메모리 부족을 알리는 경우 발생
+    /// iOS: [UIApplicationDelegate applicationDidReceiveMemoryWarning]
+    /// Android: onLowMemory() and onTrimMemory(level == TRIM_MEMORY_RUNNING_CRITICAL)
+    /// </summary>
+    private void OnLowMemory()
+    {
+        mIsLowMemory = true;
+
+        if (MemoryWarningTimer.isPlaying == false || MemoryWarningTimer.IsExpired(30f))
+        {
+            //LogFile.Write("Memory Warning Process");
+            MemoryWarningTimer.Start();
+            Resources.UnloadUnusedAssets();
+            System.GC.Collect();
+        }
+    }
+
+    public bool IsLowMemory()
+    {
+        return mIsLowMemory;
+    }
+
+    #endregion ( Event Funtion. )
+
+    //---------------------------------------------------
+    // Private Funtion.
+
+    #region ( Private Funtion. )
+
+    private void CheckAutoAssistSkill(float fElapsed)
+    {
+        if (gameModel.GameAutoAssistSkill == false)
+            return;
+
+        assistSkillCheckTime += fElapsed;
+
+        if (assistSkillCheckTime >= 0.4f)
+        {
+            List<int> validSkill = H60ModelManager.Instant.mlAssistSkill.GetValidAssistSpecialSkill(gameModel.FormulaBattleType);
+            if (validSkill == null || validSkill.Count == 0)
+                return;
+
+            //격파 대기 UI가 보이고 있는 상태에선 자동 발동을 막음
+            if (UI_Game.Instant != null && UI_Game.Instant.mainBossDirection.WaitObjEnable)
+            {
+                assistSkillCheckTime = 0.0f;
+                return;
+            }
+
+            //격파 보스 연출중 상태에선 자동 발동을 막음.
+            if (H60BattleLogic.isMBSceneBossDirection())
+            {
+                assistSkillCheckTime = 0.0f;
+                return;
+            }
+
+            if (gameModel.IsBossStage)
+            {
+                // 보스가 공격을 받은 적이 있는가?
+                List<H60Character> activeChars = group.EnemyGroupAttr.ActiveCharacters;
+                if (activeChars != null && activeChars.Count > 0)
+                {
+                    int hitCharCount = activeChars[0].CharAttr.GetDamageMeterCharCount();
+                    if (hitCharCount == 0)
+                    {
+                        assistSkillCheckTime = 0.0f;
+                        return;
+                    }
+                }
+            }            
+
+            int skillIndex = validSkill[0];
+            bool ret = OnUIAssistSpecialSkillCkick(skillIndex);
+            if (ret)
+            {
+                assistSkillCheckTime = 0.0f;
+            }
+        }
+    }
+
+    private void UpdateBattleInState(float fElapsed, GameSpeedType xSpeed, float finalGameSpeedValue)
+    {
+        BattleTransitionTimer.UpdateFrame(fElapsed);
+        if (BattleTransitionTimer.isFinish())
+        {
+            ChangeState(MBSceneState.Battle);
+        }
+    }
+
+    private void UpdateBattleState(float fElapsed, GameSpeedType xSpeed, float finalGameSpeedValue)
+    {
+        group.InStageBossTimer.UpdateFrame(fElapsed);
+        bool battleFinish = group.isBattleFinish(ref result);
+
+        if (battleFinish)
+        {
+            //여기에 아군/적군의 battle finish를호출해 준다.
+            List<H60Character> activeChars = null;
+            activeChars = group.MyGroupAttr.ActiveCharacters;
+            for (int i = 0; i < activeChars.Count; i++)
+                activeChars[i].ProcBattleFinish();
+            activeChars = group.EnemyGroupAttr.ActiveCharacters;
+            for (int i = 0; i < activeChars.Count; i++)
+                activeChars[i].ProcBattleFinish();
+
+            if (gameModel.MainBattleType == H60BattleType.MainBattle && H60ModelManager.Instant.mlGame.IsBossStage)
+            {
+                //승패에 다른 연출 띄우기
+                ChangeState(MBSceneState.BattleOutDirection);
+            }
+            else if (gameModel.MainBattleType == H60BattleType.ChallengeBossBattle)
+            {
+                //도전 보스 끝내기 연출
+                ChangeState(MBSceneState.BattleOutDirection);
+            }
+            else
+            {
+                ChangeState(MBSceneState.BattleOut);
+            }
+            return;
+        }
+
+        // 이계장수 auto skill check
+        CheckAutoAssistSkill(fElapsed);
+
+        H60EntityManager.Instant.UpdateFrame(fElapsed, xSpeed, finalGameSpeedValue);
+        H60BattleLogicMussang.Personal_UpdateFrame(fElapsed);
+
+        group.UpdateFrame(fElapsed, xSpeed);
+
+        if (gameModel.FormulaBattleType == H60BattleType.MainBattle)
+        {
+            CheckBattleRootPosition(battleFinish);
+        }
+
+        H60BattleLogicMussang.Union_UpdateFrame(fElapsed);
+    }
+
+    private void UpdateBattleOutDirection(float fElapsed, GameSpeedType xSpeed, float finalGameSpeedValue)
+    {
+        OutDirectionTimer.UpdateFrame(Time.deltaTime); //fElapsed);
+        if (OutDirectionTimer.isFinish())
+        {
+            if (UI_Game.Instant != null)
+                UI_Game.Instant.mainBossDirection.DirectionOff();
+
+            OutDirectionTimer.Active(false);
+            ChangeState(MBSceneState.BattleOut);
+        }
+    }
+
+    /// <summary>
+    /// 챕터 보스 / 도전 보스의 연출 중 승리/패배 연출을 '수동'으로 빠져나갈 수 있도록 하기위해 마련한 함수
+    /// 타이머의 시간을 매우 길게 설정해 놓았기 때문에, 단순히 '강제 종료' 할 수 있도록 했다.
+    /// </summary>
+    public void ForceFinish_UpdateBattleOutDirection()
+    {
+        if (UI_Game.Instant != null)
+            UI_Game.Instant.mainBossDirection.DirectionOff();
+
+        OutDirectionTimer.Active(false);
+        ChangeState(MBSceneState.BattleOut);
+    }
+
+    private void UpdateBattleOut(float fElapsed, GameSpeedType xSpeed, float finalGameSpeedValue)
+    {
+        if (H60ModelManager.Instant.mlGame.MainBattlePause)
+            return;
+
+        if (BattleTransitionTimer.isActive())
+        {
+            BattleTransitionTimer.UpdateFrame(fElapsed);
+            if (BattleTransitionTimer.isFinish())
+            {
+                BattleTransitionTimer.Active(false);
+
+                switch (gameModel.MainBattleType)
+                {
+                    case H60BattleType.MainBattle:
+                        {
+                            switch (result)
+                            {
+                                case H60MBResult.Win:
+                                    {
+                                        ProcBattleWin();
+                                    }
+                                    break;
+
+                                case H60MBResult.Fail:
+                                    {
+                                        if (gameModel.IsBossStage)
+                                        {
+                                            gameModel.PrevBossBattleWin = false;
+                                        }
+
+                                        StageChapter_Info startChapter = null;
+                                        StageChapter_Info startChapterGroup = null;
+                                        BS_BASE_STAGE_INFO stageInfo = null;
+
+                                        int decStage = H60PAM.Instant.GetMBFailDecStageCount();
+
+                                        //// 보스 stage에서 fail을 했으면..
+                                        if (gameModel.CheckBossStage(gameModel.PlayStage))
+                                        {
+                                            stageInfo = CStageInfo_Manager.Instance.GetInfo(gameModel.PlayStage - 1);
+                                        }
+                                        else
+                                        {
+                                            stageInfo = CStageInfo_Manager.Instance.GetInfo(gameModel.PlayStage);
+                                        }
+
+                                        H60TableUtil.FindChapter(stageInfo.Chapter, stageInfo.StageCount, out startChapter, out startChapterGroup);
+                                        if (gameModel.RetreatEnable)
+                                        {
+                                            decStage = gameModel.PlayStage - startChapter.Start_Stage;
+                                        }
+                                        else
+                                        {
+                                            decStage = gameModel.PlayStage - startChapterGroup.Start_Stage;
+                                        }
+
+                                        gameModel.DecPlayStage(decStage);
+                                        onClickEnterBossStage = 0;
+                                    }
+                                    break;
+
+                                case H60MBResult.Rebirth:
+                                    result = H60MBResult.Win;
+                                    break;
+                            }
+
+                            // 사용하지 않는 리소스는 해제한다.
+                            if (unloadResourceTime >= H60PAM.Instant.GetUnloadUnusedCheckTime() || IsLowMemory())
+                            {
+                                ResourcesUnloadUnusedAssets();
+                            }
+
+                            //여기에 이거 있는 것 잘 보기
+                            ChangeState(MBSceneState.BattleIn);
+                        }
+                        break;
+
+                    case H60BattleType.ChallengeBossBattle:
+                        {
+                            ReturnToStoryMode();
+                        }
+                        break;
+
+                    case H60BattleType.DungeonBattle:
+                        {
+                            H60DungeonModel dungeonModel = H60ModelManager.Instant.mlDungeonModel;
+                            NetworkSession.Instant.On_rq_dungeon_end(dungeonModel.PlayDungeonType, (sbyte)dungeonModel.PlayDungeonInfoIndex, dungeonModel.PlayFloorCount, (sbyte)result, dungeonModel.HitRewardAmount);
+                        }
+                        break;
+
+                    case H60BattleType.WorldBoss:
+                        {
+
+                        }
+                        break;
+
+                    case H60BattleType.PvPBattle:
+                        H60ModelManager.Instant.mlGame.PauseGame();
+                        switch (result)
+                        {
+                            case H60MBResult.Win:
+                                NetworkSession.Instant.On_rq_pvp_battle_end(true, H60ModelManager.Instant.mlPvP.OpponentID, H60ModelManager.Instant.mlPvP.CurrentBattlePower);
+                                break;
+
+                            case H60MBResult.Fail:
+                                NetworkSession.Instant.On_rq_pvp_battle_end(false, H60ModelManager.Instant.mlPvP.OpponentID, H60ModelManager.Instant.mlPvP.CurrentBattlePower);
+                                break;
+                        }
+                        break;
+                }
+            }
+        }
+    }
+
+    /// <summary> 현재 참조 카운트가 0인 모든 Resources 오브젝트들을 메모리에서 해제
+    /// ObjectPool 리콜 중인 것 Clear
+    /// LowMemory 이면 GC.Collect
+    /// </summary>
+    public void ResourcesUnloadUnusedAssets()
+    {
+        if (ResourceManager.Instant != null)
+            ResourceManager.Instant.ObjectPoolDicClear();
+
+        unloadResourceTime = 0.0f;
+        if (IsLowMemory())
+        {
+            mIsLowMemory = false;
+        }
+    }
+
+    private int ProcJumpStage(int incStageCount)
+    {
+        int nextIncStageCount = 0;
+
+        List<long> activePartyList = H60ModelManager.Instant.mlCharacter.ActiveParty;
+        if (null != activePartyList)
+        {
+            for (int i = 0; i < activePartyList.Count; i++)
+            {
+                H60CharacterData charData = H60ModelManager.Instant.mlCharacter.FindCharacterFromSerialId(activePartyList[i]);
+                if (null == charData)
+                    continue;
+
+                SysStageJumping sysStageJumpingData = charData.sysStageJumpingInfo;
+                if (null == sysStageJumpingData)
+                    continue;
+
+                if (true == sysStageJumpingData.isStageJumpingKnight && sysStageJumpingData.jumpingValue == incStageCount)
+                {
+                    float percent = sysStageJumpingData.percent;
+
+                    float randValue = Random.Range(0.0f, 100.0f);
+
+                    if (randValue < percent)
+                    {
+                        nextIncStageCount += incStageCount;
+                        H60UIActionManager.Instant.ActionCharacterSkillMainStageSkip(charData, incStageCount);
+                        ReferenceManager.UpdateSkipStage(charData);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return nextIncStageCount;
+    }
+
+    public void ProcBattleWin()
+    {
+        // 격파보스일 경우 승리 정보 입력.
+        if (gameModel.IsBossStage)
+        {
+            gameModel.PrevBossBattleWin = true;
+        }
+
+        int incStageCount = 1;
+        int decStageCount = 0;
+
+        int TopStage = H60ModelManager.Instant.mlAccount.MyInfo.topStageNo;
+        int NextStage = gameModel.PlayStage + incStageCount;
+
+        if (gameModel.CheckBossStage(gameModel.PlayStage))
+        {
+            gameModel.ClearStageNo = gameModel.PlayStage;
+            gameModel.ClearStageCount += 1;
+        }
+        else
+        {
+            if (onClickEnterBossStage > 0)
+            {
+                incStageCount = onClickEnterBossStage;
+
+                gameModel.ClearStageNo = gameModel.PlayStage;
+                gameModel.ClearStageCount += 0;
+                onClickEnterBossStage = 0;
+            }
+            else
+            {
+                bool isCastleStage = false;
+                BS_BASE_STAGE_INFO stageInfo = CStageInfo_Manager.Instance.GetInfo(gameModel.PlayStage);
+                if (stageInfo.Castle_Type >= BS_DATA.StageCastleType.SMALL_CASTLE)
+                {
+                    isCastleStage = true;
+                }
+
+                if (isCastleStage)
+                {
+                    StageChapter_Info startChapter = null;
+                    StageChapter_Info startChapterGroup = null;
+                    if (H60TableUtil.FindChapter(stageInfo.Chapter, gameModel.PlayStage, out startChapter, out startChapterGroup))
+                    {
+                        if (gameModel.RetreatEnable)
+                        {
+                            decStageCount = gameModel.PlayStage - startChapter.Start_Stage;
+                        }
+                        else
+                        {
+                            decStageCount = gameModel.PlayStage - startChapterGroup.Start_Stage;
+                        }
+                    }
+                }
+
+                gameModel.ClearStageNo = gameModel.PlayStage;
+                gameModel.ClearStageCount += 1;
+            }
+        }
+
+        if (decStageCount > 0)
+            gameModel.DecPlayStage(decStageCount);
+        else
+            gameModel.IncPlayStage(incStageCount);
+    }
+
+    private bool Check5XSpeed()
+    {
+        if (H60ModelManager.Instant.mlCharacter.KnightSysSpeed5xEffectInfo.IsContainSysSpeedEffectKnight == false)
+            return false;
+
+        float speedPercent = H60ModelManager.Instant.mlCharacter.KnightSysSpeed5xEffectInfo.ProbabilityValue;
+
+        float randValue = Random.Range(0.0f, 100.0f);
+        if (randValue < speedPercent)
+            return true;
+
+        return false;
+    }
+
+    private void CheckBattleRootPosition(bool battleFinish)
+    {
+        farCharPosX = group.GetFarMyCharPositionX();
+        rootFarCharPosX = farCharPosX - objRoot.localPosition.x;
+
+        movePercent = group.GetMyCharMovePercent();
+        fastSpeed = group.GetMyCharFastSpeed();
+        fastSpeedRatio = 1.0f;
+        if (fastSpeed > 1.0)
+        {
+            fastSpeedRatio = (float)(1.0 - (fastSpeed - 1.0) * 0.2);
+            if (fastSpeedRatio < 0.2f)
+                fastSpeedRatio = 0.2f;
+        }
+
+        if (battleFinish == false)
+        {
+            float adjustTargetPosX = 0.0f;
+            {
+                adjustTargetPosX = -(farCharPosX);
+
+                if (adjustTargetPosX > oriRootPos.x)
+                    adjustTargetPosX = oriRootPos.x;
+
+                if (adjustTargetPosX >= 0.0f)
+                    adjustTargetPosX = 0.0f;
+            }
+
+            if (isAdjustPos == false && objRoot.localPosition.x < -10.0f)
+            {
+                if (farCharPosX < 0.0f)
+                {
+                    adjustTargetPosX = oriRootPos.x;
+                }
+            }
+
+            cameraFinalPos.Set(adjustTargetPosX, oriRootPos.y, oriRootPos.z);
+
+            if (isAdjustPos)
+            {
+                twpRoot.to = cameraFinalPos;
+            }
+            else
+            {
+                float cameraMoveDist = Mathf.Abs(adjustTargetPosX - objRoot.localPosition.x);
+
+                if (cameraMoveDeltaX > 0.0f && cameraMoveDist > cameraMoveDeltaX * 20.0f)
+                {
+                    cameraFinalPos.Set(adjustTargetPosX, oriRootPos.y, oriRootPos.z);
+                    twpRoot.from = objRoot.localPosition;
+                    twpRoot.to = cameraFinalPos;
+                    twpRoot.enabled = true;
+                    twpRoot.ResetToBeginning();
+                    float gameSpeedValue = Mathf.Max(1.0f, gameModel.GetFinalGameSpeedValue());
+                    twpRoot.duration = 1.0f * fastSpeedRatio / gameSpeedValue;
+                    isAdjustPos = true;
+                }
+                else
+                {
+                    objRoot.localPosition = cameraFinalPos;
+                    if (cameraMoveDist > 0.0f)
+                    {
+                        cameraMoveDeltaX = (cameraMoveDeltaX + cameraMoveDist) * 0.5f;
+                    }
+                }
+            }
+        }
+    }
+
+    private Texture2D[] MainBattleBGTextures;
+    private Texture2D[] DungeonBGTextures;
+    private Texture2D[] PvPBGTextures;
+
+    private void ChangeBG()
+    {
+        staticBackground.mainTexture = null;
+        staticBackground.enabled = false;
+        if (layerdBackgroundManager.gameObject.activeSelf == false)
+            layerdBackgroundManager.gameObject.SetActive(true);
+
+        switch (gameModel.MainBattleType)
+        {
+            case H60BattleType.MainBattle:
+                BS_BASE_STAGE_INFO stageInfo = CStageInfo_Manager.Instance.GetInfo(gameModel.PlayStage);
+                if (stageInfo != null)
+                    layerdBackgroundManager.Set(stageInfo.ChapterBGIdx);
+                else
+                    layerdBackgroundManager.Set(Random.Range(1, 10));
+
+                break;
+
+            case H60BattleType.ChallengeBossBattle:
+                Challenge_Boss_Info cbInfo = H60ModelManager.Instant.mChallengeBossModel.GetCurrentBossInfo();
+                if (cbInfo != null)
+                    layerdBackgroundManager.Set(CChapterBackground_Manager.Instance.GetInfo(cbInfo.Chapter).Background);
+                else
+                    layerdBackgroundManager.Set(Random.Range(1, 10));
+
+                break;
+
+            case H60BattleType.DungeonBattle:
+                {
+                    H60DungeonModel dungeonModel = H60ModelManager.Instant.mlDungeonModel;
+
+                    switch (dungeonModel.PlayDungeonInfoIndex)
+                    {
+                        case 1:
+                            layerdBackgroundManager.Set(100 + 0, 0, staticBackground);
+                            break;
+
+                        case 2:
+                            layerdBackgroundManager.Set(100 + 1, 0, staticBackground);
+                            break;
+
+                        case 3:
+                            layerdBackgroundManager.Set(100 + 2, 0, staticBackground);
+                            break;
+
+                        case 4:
+                            layerdBackgroundManager.Set(100 + 3, 0, staticBackground);
+                            break;
+
+                        case 5:
+                            layerdBackgroundManager.Set(100 + 4, 0, staticBackground);
+                            break;
+
+                        default:
+                            layerdBackgroundManager.Set(100 + 4, 0, staticBackground);
+                            break;
+                    }
+
+                    staticBackground.enabled = true;
+                    layerdBackgroundManager.gameObject.SetActive(false);
+                }
+                break;
+
+            case H60BattleType.WorldBoss:
+            case H60BattleType.PvPBattle:
+                {
+                    layerdBackgroundManager.Set(200, 0, staticBackground);
+
+                    staticBackground.enabled = true;
+                    layerdBackgroundManager.gameObject.SetActive(false);
+                }
+                break;
+        }
+    }
+
+    #endregion ( Private Funtion. )
+
+    //---------------------------------------------------
+    // Public Funtion.
+
+    #region ( Public Funtion. )
+
+    private void InitData()
+    {
+        result = H60MBResult.Win;
+
+        isAdjustPos = false;
+        cameraMoveDeltaX = 0.0f;
+
+        cameraWorldPos = Vector3.zero;
+        tempPos = Vector3.zero;
+
+        H60ModelManager.Instant.mlGame.BattleType = H60BattleType.MainBattle;
+        H60ModelManager.Instant.mlGame.MainBattleType = H60BattleType.MainBattle;
+
+        ChangeState(MBSceneState.BattleIn);
+    }
+
+    public void Enter()
+    {
+        group.Enter();
+        InitData();
+
+        H60ModelManager.Instant.mlCharacter.UpdateActivePartyStats();
+        H60ModelManager.Instant.mlCharacter.UpdateGodFromActivePartyKnightStat();
+        
+        GeneralUtils.PlayBgmMainBattle();
+    }
+
+    public void Exit()
+    {
+        H60BattleDirection.Instant.BattleChangeRelease();
+        group.Exit();
+    }
+
+    private void BattleInEnter(float gameSpeedValue)
+    {
+        objRoot.localPosition = oriRootPos;
+        twpRoot.enabled = false;
+        isAdjustPos = false;
+
+        ChangeBG();
+
+        BattleTransitionTimer.StartTimer(MBattleDefine.BATTLE_FADE_IN_TIME / gameSpeedValue);
+    }
+
+    private void BattleEnter(float gameSpeedValue)
+    {
+    }
+
+    private int displayChapter = 0;
+    private int displayChapterLocal = 0;
+    private void BattleOutEnter(float gameSpeedValue)
+    {
+        BS_BASE_STAGE_INFO stageInfo = null;
+        if (gameModel.MainBattleType == H60BattleType.MainBattle && gameModel.IsBossStage)
+        {
+            if (result == H60MBResult.Win)
+                stageInfo = CStageInfo_Manager.Instance.GetInfo(gameModel.PlayStage + 1);
+            else
+                stageInfo = CStageInfo_Manager.Instance.GetInfo(gameModel.PlayStage);
+
+            var chapter = XGuard.CStageChapter_Manager.Instance.GetInfoList().Find(obj => obj.Index == stageInfo.Reward);
+            if (null != chapter)
+                displayChapterLocal = chapter.Name_LocalIndex;
+            displayChapter = stageInfo.Chapter;
+        }
+
+        if (GUI_Main_EnterChapter.Instant != null && stageInfo != null && (result == H60MBResult.Win || stageInfo.ChapterStart == stageInfo.Return_Stage))
+        {
+            float dTime = (MBattleDefine.BATTLE_FADE_OUT_TIME * 3) / gameSpeedValue;
+            BattleTransitionTimer.StartTimer(dTime);
+            Invoke("EnterChapter", dTime * 0.5f);
+        }
+        else
+        {
+            BattleTransitionTimer.StartTimer(MBattleDefine.BATTLE_FADE_OUT_TIME / gameSpeedValue);
+        }
+    }
+
+    public void ChangeState(MBSceneState newState)
+    {
+        float gameSpeedValue = Mathf.Max(1.0f, gameModel.GetFinalGameSpeedValue());
+
+        switch (newState)
+        {
+            case MBSceneState.BattleIn:
+                {
+                    H60BattleDirection.Instant.BattleIn();
+                    BattleInEnter(gameSpeedValue);
+                }
+                break;
+
+            case MBSceneState.Battle:
+                {
+                    BattleEnter(gameSpeedValue);
+                }
+                break;
+
+            case MBSceneState.BattleOutDirection:
+                {
+                    if (UI_Game.Instant != null)
+                    {
+                        if (result == H60MBResult.Win)
+                        {
+                            if (H60ModelManager.Instant.mlGame.MainBattleType == H60BattleType.MainBattle && H60ModelManager.Instant.mlGame.IsMidBossStage)
+                            {
+                                //그룹에서 보스(중 보스)를 찾아서 표시 -> 그룹에 보스는 반드시 하나 존재함을 가정함
+                                BS_BASE_STAGE_INFO tableStageInfo = CStageInfo_Manager.Instance.GetInfo(H60ModelManager.Instant.mlGame.PlayStage);
+                                List<StageMonster_Info> stageMonsterInfo = tableStageInfo.MonsterGroup;
+                                StageMonster_Info find_Boss = stageMonsterInfo.Find(f => f.Monster_Grade == (int)BS_DATA.StageMonsterGrade.BOSS);
+                                if (UI_Game.Instant != null && find_Boss != null)
+                                    UI_Game.Instant.mainBossDirection.WinStart(find_Boss.Monster_Index);
+                                //--
+
+                                OutDirectionTimer.StartTimer(GUI_Main_BossDirection.WIN_DIRECTION_TIME2);// ([TIME] / gameSpeedValue);
+                            }
+                            else
+                            {
+                                if (H60ModelManager.Instant.mlGame.MainBattleType == H60BattleType.ChallengeBossBattle)
+                                {
+                                    H60ModelManager.Instant.mChallengeBossModel.RequestChallengeBossEnd();
+                                }
+                                else
+                                {
+                                    BS_BASE_STAGE_INFO stageInfo = CStageInfo_Manager.Instance.GetInfo(gameModel.PlayStage);
+                                    var chapterInfo = CStageChapter_Manager.Instance.GetInfoList().FindLast(d => d.Chapter == stageInfo.Chapter);
+                                    H60KarmaModel kModel = H60ModelManager.Instant.mlKarmaModel;
+
+                                    //보스 나레이션이 존재하고 그것이 챕터 엔딩일 경우 나레이션 매니저쪽에서 처리한다.
+                                    if (chapterInfo != null && kModel.Narration_ContainsKey(H60KarmaModel.Narration_Find_Type.StageCount, gameModel.PlayStage))
+                                    {
+                                        if (chapterInfo.BossStage == 2) //업보 보스
+                                        {
+                                            var narKey = kModel.Get_NarrationKeyData(H60KarmaModel.Narration_Find_Type.NarrationType, (int)H60KarmaModel.Narration_KeyType.Karma_End);
+                                            if (narKey.Narr_Type == H60KarmaModel.Narration_KeyType.Karma_End)
+                                            {
+                                                if(kModel.Is_Contect_Narration(narKey.GroupIndex)) //스테이지를 뒤로 돌렸을 경우의 예외상황.
+                                                    UI_Game.Instant.mainBossDirection.WinStart();
+                                                else //초회 진행 루트 (일반적인 유저는 이쪽을 타게 된다)
+                                                    ReferenceManager.Call_Check_N_Start_Karma_Narration(H60KarmaModel.Narration_KeyType.Karma_End);
+                                            }
+                                        }
+                                        else if (chapterInfo.BossStage == 1) //중간보스는 나레이션 키가 존재해도, 이건 보스전 종료 나레이션이기에 스킵
+                                        {
+                                            UI_Game.Instant.mainBossDirection.WinStart();
+                                        }
+                                    }
+                                    else //나레이션 데이터가 존재하지 않으면 기존대로.
+                                        UI_Game.Instant.mainBossDirection.WinStart();
+                                }
+                                OutDirectionTimer.StartTimer(GUI_Main_BossDirection.WIN_DIRECTION_TIME1);// ([TIME] / gameSpeedValue);
+                            }
+                        }
+                        else if (result == H60MBResult.Fail)
+                        {
+                            if (H60ModelManager.Instant.mlGame.MainBattleType == H60BattleType.ChallengeBossBattle)
+                                H60ModelManager.Instant.mChallengeBossModel.RequestChallengeBossEnd();
+
+                            UI_Game.Instant.mainBossDirection.FailStart();
+                            OutDirectionTimer.StartTimer(GUI_Main_BossDirection.FAIL_DIRECTION_TIME);
+                        }
+                    }
+                }
+                break;
+
+            case MBSceneState.BattleOut:
+                {
+                    H60BattleDirection.Instant.BattleOut();
+                    BattleOutEnter(gameSpeedValue);
+                }
+                break;
+        }
+
+        sceneState = newState;
+
+        group.NotifySceneState(newState);
+    }
+
+    public void ChangeBattleType(H60BattleType mainBattleType)
+    {
+        //pvp/dungeon -> main 전환
+        if (gameModel.MainBattleType != H60BattleType.MainBattle && mainBattleType == H60BattleType.MainBattle)
+        {
+            gameModel.MainBattleType = mainBattleType; //어느 배틀에서 어느 배틀로 전환하는지 체크 끝나고나서 MainBattleType 설정해야 한다
+
+            H60SysEffectManager.Instant.SetInactivePartyDirtyFlag();
+            H60SysEffectManager.Instant.SetDirtyAllFlags();
+            H60SysEffectManager.Instant.LateUpdateData();
+
+            charModel.UpdateActivePartyStats();
+            GeneralUtils.PlayBgmMainBattle();
+        }
+        //main -> pvp/dungeon 전환
+        else if (gameModel.MainBattleType == H60BattleType.MainBattle && mainBattleType != H60BattleType.MainBattle)
+        {
+            if (UI_Game.Instant != null)
+                UI_Game.Instant.mainBossDirection.DirectionOff();
+
+            //여러 단계를 거친 후 늦게 불려지기 때문이다.(메인 전투에서 표시된 군영의 '잔상' 같은 느낌이라고 보면 됨)
+            MyGate00.SetActive(false);
+            //--
+
+            gameModel.MainBattleType = mainBattleType; //어느 배틀에서 어느 배틀로 전환하는지 체크 끝나고나서 MainBattleType 설정해야 한다
+
+            if (mainBattleType == H60BattleType.DungeonBattle)
+            {
+                charModel.SetDungeonPartyList();
+            }
+            else if (mainBattleType == H60BattleType.ChallengeBossBattle)
+            {
+                charModel.AssignChallengeBossPartyList(H60ModelManager.Instant.mChallengeBossModel.GetParty());
+            }
+            else if(mainBattleType == H60BattleType.WorldBoss)
+            {
+            }
+
+            H60SysEffectManager.Instant.SetInactivePartyDirtyFlag();
+            H60SysEffectManager.Instant.SetDirtyAllFlags();
+            H60SysEffectManager.Instant.LateUpdateData();
+
+            charModel.UpdateActivePartyStats();
+
+            float stopFadeOutdelayTime = 0.8f;
+            JukeBox.Instant.StopBgm(stopFadeOutdelayTime);
+            Invoke("PlayBgmPVP", stopFadeOutdelayTime);
+        }
+
+        // 실시간 전투 정보를 초기화 한다.
+        H60ModelManager.Instant.mlCharacter.SkillCoolTimeReset();
+        ChangeState(MBSceneState.BattleIn);
+        gameModel.UpdatePlayStageEvent();
+    }
+
+    void PlayBgmPVP()
+    {
+        GeneralUtils.PlayBgmPVP();
+    }
+    public void ProcRebirth()
+    {
+        result = H60MBResult.Rebirth;
+        ChangeState(MBSceneState.BattleOut);
+    }
+
+    public void EnterBossStage()
+    {
+        int TopStage = H60ModelManager.Instant.mlAccount.MyInfo.topStageNo;
+        int BossStage = H60TableUtil.FindChapterBossStage(TopStage);
+        if (BossStage > 0)
+        {
+            NetworkSession.Instant.On_rq_goto_boss_stage(BossStage);
+        }
+    }
+
+    private void ReceiveEvent_EnterBossStage(rs_goto_boss_stage Protocol)
+    {
+        if ((PACKET_RESULT)Protocol.result == PACKET_RESULT.eSUCCESS)
+        {
+            onClickEnterBossStage = Protocol.stageno - gameModel.PlayStage;
+            result = H60MBResult.Win;
+            ChangeState(MBSceneState.BattleOut);
+        }
+        else
+        {
+            PopupManager.Instant.AddToastMsg(
+                null,
+                Localization.Get("7"),
+                1f
+                );
+        }
+    }
+
+    private void OnEventSkillBliendAlphaFinish()
+    {
+        skillSpriteRender.gameObject.SetActive(false);
+    }
+
+    private void OnEventCharacterChangeStateFuncEnter(H60Character h60Char, H60EntityState enterState)
+    {
+        if (gameModel.BattleType != H60BattleType.MainBattle)
+            return;
+
+        H60BattleLogicMussang.ChangeStateFuncEnter(h60Char, enterState);
+
+        // 던전 임무...
+        MBDungeonGameRule.ProcDungeonHit(h60Char, enterState);
+    }
+
+    private void OnEventCharacterSkillEnter(H60Character h60Char)
+    {
+        if (gameModel.BattleType != H60BattleType.MainBattle)
+            return;
+
+        H60BattleDirection.Instant.CharacterSkillEnter(h60Char);
+    }
+
+    private void OnEventCharacterSkillExit(H60Character h60Char)
+    {
+        if (gameModel.BattleType != H60BattleType.MainBattle)
+            return;
+
+        H60BattleDirection.Instant.CharacterSkillExit(h60Char);
+        H60BattleLogicMussang.CharacterSkillExit(h60Char);
+    }
+
+    private void OnEventCharacterSkillAction(H60Character h60Char)
+    {
+        if (gameModel.BattleType != H60BattleType.MainBattle)
+            return;
+    }
+
+    private void OnEventCharacterDeath(H60Entity h60Entity)
+    {
+        if (h60Entity.EntityType != H60EntityType.Character)
+            return;
+
+        if (gameModel.BattleType != H60BattleType.MainBattle)
+            return;
+
+        H60Character h60DeathChar = (H60Character)h60Entity;
+
+        // 무쌍 charge 계산...
+        // 죽은 캐릭터가 아군이면...
+        List<H60Character> activeCharacters = null;
+        if (h60DeathChar.CharAttr.myChar == true)
+        {
+            // 적군 active 리스트를 가져온다.
+            activeCharacters = group.EnemyGroupAttr.ActiveCharacters;
+        }
+        else
+        {
+            // 아군 active 리스트를 가져온다.
+            activeCharacters = group.MyGroupAttr.ActiveCharacters;
+        }
+
+        if (activeCharacters.Count > 0)
+        {
+            for (int i = 0; i < activeCharacters.Count; i++)
+            {
+                H60BattleLogicMussang.AddEnemyDeathChargeValue(activeCharacters[i], h60DeathChar);
+            }
+        }
+
+        H60BattleDirection.Instant.CharacterDeath(h60DeathChar);
+    }
+
+    private void OnEventUnionMussangActive()
+    {
+        H60BattleDirection.Instant.MB_ActiveUnionMussang();
+    }
+
+    private void OnEventUnionMussangDeActive()
+    {
+
+    }
+
+    public float GetCameraPositionX()
+    {
+        return objRoot.localPosition.x;
+    }
+
+    public Vector3 GetBattleCenterPos()
+    {
+        tempPos.x = -GetCameraPositionX();
+        tempPos.y = WORLD_CENTER_Y;
+        tempPos.z = 0.0f;
+
+        return tempPos;
+    }
+
+    public H60WorldTarget GetCameraWorldTargetEntity()
+    {
+        return cameraWorldTarget;
+    }
+
+    public void ReturnToStoryMode()
+    {
+        var battleUI = LobbyUIManager.Instant.GetItem<UITabMenu_Battle>(LobbyUIManager.UI_TYPE.UI_TabMenu_Battle);
+        if (battleUI.gameObject.activeInHierarchy)
+            battleUI.Show(false);
+
+        H60ModelManager.Instant.mlGame.ResumeGame();
+        ChangeBattleType(H60BattleType.MainBattle);
+    }
+
+    #endregion ( Public Funtion. )
+
+    //---------------------------------------------------
+    // Assist Skill Function.
+
+    #region ( Assist Skill Function. )
+
+    public bool OnUIAssistSpecialSkillCkick(int skillIndex)
+    {
+        if (gameModel.FormulaBattleType != H60BattleType.MainBattle)
+            return false;
+
+        AssistSkillUnitData skillUnit = H60ModelManager.Instant.mlAssistSkill.mainSkillUnit;
+
+        List<H60AssistSkillBuff> assistSkillBuffs = H60BattleLogicDamage.ProcMB_AssistSpecialSkill(skillUnit, skillIndex);
+        if (assistSkillBuffs == null || assistSkillBuffs.Count == 0)
+            return false;
+
+        for (int i = 0; i < assistSkillBuffs.Count; i++)
+        {
+            AddAssistSkillBuff(assistSkillBuffs[i], true);
+        }
+
+        H60BattleLogic.ProcUseAssistSpecialSkill(skillIndex);
+
+        return true;
+    }
+
+    #endregion ( Assist Skill Function. )
+
+    //---------------------------------------------------
+    // Stage Rule Function.
+
+    #region ( Stage Rule Function. )
+
+    public void AddAssistSkillBuff(H60AssistSkillBuff assistSkillBuff, bool isMyTeam)
+    {
+        group.AddAssistSkillBuff(assistSkillBuff, isMyTeam);
+    }
+
+    public void AddStageBuff(H60StageBuff stageBuff, bool isMyTeam)
+    {
+        group.AddStageBuff(stageBuff, isMyTeam);
+    }
+
+    public H60Character CreateDuplicationTrickCharacter(H60Character h60Owner, float lifeTime)
+    {
+        return group.CreateDuplicationTrickCharacter(h60Owner, lifeTime);
+    }
+
+    #endregion ( Stage Rule Function. )
+}
