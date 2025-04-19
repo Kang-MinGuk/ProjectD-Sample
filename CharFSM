@@ -1,0 +1,1199 @@
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace XGuard
+{
+    public class BattleCharFSM : CharacterFSM
+    {
+        public const float HERO_DIST = 250.0f;
+        public const float RUNAWAY_CHECK_DIST = 150.0f;
+        public const float RUNAWAY_TIMESTONE_OFFSET = 40.0f;
+        public const int AUTO_GOD_SKILL_ENEMY_COUNT = 4;
+        public const int AUTO_GOD_BUFF_SKILL_ENEMY_COUNT = 1;
+
+        private MBattleH60CharGroup group;
+        private Vector3 runAwayPos = Vector3.zero;
+        private int backAwayHitCount = 0;
+
+        private List<int> userInputSpecialSkills = new List<int>();
+
+        public override void ActionDamageNotify(Entity sourceEntity, EntityDamageStuff damageStuff, LONGDOUBLE decDamage)
+        {
+            if (H60CharacterUtil.isHeroCharacter(entity))
+            {
+                if (damageStuff.h60Target != null && damageStuff.h60Target.UniqueId == entity.UniqueId)
+                {
+                    backAwayHitCount++;
+                    if (backAwayHitCount >= 1)
+                    {
+                        ChangeState(EntityState.BackAway);
+                        backAwayHitCount = 0;
+                    }
+                }
+                else
+                {
+                    base.ActionDamageNotify(sourceEntity, damageStuff, decDamage);
+                }
+            }
+            else
+            {
+                base.ActionDamageNotify(sourceEntity, damageStuff, decDamage);
+            }
+        }
+
+        //---------------------------------------------------
+        // Search Function.
+        #region ( Search Function. )
+
+        private bool isBattleState(H60Character h60Char)
+        {
+            if (h60Char == null)
+                return false;
+
+            EntityState state = h60Char.FSM.GetState();
+            if (state == EntityState.AttackWait || state == EntityState.Attack || state == EntityState.Skill)
+                return true;
+
+            return false;
+        }
+
+        private H60Character CheckBattleOrderPos(bool meleeCheck)
+        {
+            // melee일 경우 자기 앞의 캐릭터를 검사한다.
+            if (entity.CharAttr.useBattleSpaceOffset)
+            {
+                int battleSpaceOrder = entity.CharAttr.battleSpaceOrder;
+                // if (battleSpaceOrder > 0 && meleeCheck)
+                if (battleSpaceOrder > 0)
+                {
+                    H60Character frontChar = null;
+                    if (entity.CharAttr.myChar)
+                    {
+                        if (battleSpaceOrder < group.MyGroupAttr.ActiveCharacters.Count)
+                            frontChar = group.MyGroupAttr.ActiveCharacters[battleSpaceOrder - 1];
+                    }
+                    else
+                    {
+                        if (battleSpaceOrder < group.EnemyGroupAttr.ActiveCharacters.Count)
+                            frontChar = group.EnemyGroupAttr.ActiveCharacters[battleSpaceOrder - 1];
+                    }
+
+                    // 앞이 melee 캐릭터일 경우.
+                    if (frontChar != null && H60CharacterUtil.isMeleeAttack(frontChar.CharAttr.charData) == meleeCheck && isBattleState(frontChar))
+                    {
+                        if (meleeCheck)
+                        {
+                            Vector3 myPos = entity.GetPosition();
+                            Vector3 frontCharPos = frontChar.GetPosition();
+                            float randValue = Random.Range(30.0f, 45.0f);
+
+                            if (frontCharPos.x - myPos.x < randValue)
+                                return frontChar;
+                        }
+                        else
+                        {
+                            float frontAttackDistance = H60CharacterUtil.GetChar_AttackDistance(frontChar.CharAttr.charData);
+                            float entityAttackDistance = H60CharacterUtil.GetChar_AttackDistance(entity.CharAttr.charData);
+
+                            if (entityAttackDistance >= frontAttackDistance - 10.0f)
+                            {
+                                Vector3 myPos = entity.GetPosition();
+                                Vector3 frontCharPos = frontChar.GetPosition();
+                                float randValue = Random.Range(50.0f, 70.0f);
+
+                                if (frontCharPos.x - myPos.x < randValue)
+                                    return frontChar;
+                            }
+                        }                        
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private H60Character GetFrontMeleeCharacter()
+        {
+            List<H60Character> characters = null;
+
+            if (entity.CharAttr.myChar)
+                characters = group.MyGroupAttr.ActiveCharacters;
+            else
+                characters = group.EnemyGroupAttr.ActiveCharacters;
+
+            for(int i = 0; i < characters.Count; i++)
+            {
+                if (H60CharacterUtil.isMeleeAttack(characters[i].CharAttr.charData))
+                    return characters[i];
+            }
+
+            return null;
+        }
+
+        private int GetMyTeamMeleeCount()
+        {
+            List<H60Character> characters = null;
+
+            if (entity.CharAttr.myChar)
+                characters = group.MyGroupAttr.ActiveCharacters;
+            else
+                characters = group.EnemyGroupAttr.ActiveCharacters;
+
+            int myTeamCount = 0;
+
+            for (int i = 0; i < characters.Count; i++)
+            {
+                if (H60CharacterUtil.isMeleeAttack(characters[i].CharAttr.charData))
+                    myTeamCount++;
+            }
+
+            return myTeamCount;
+        }
+
+        public override Entity SearchBoss()
+        {
+            List<H60Character> tempList;
+
+            if (entity.CharAttr.myChar)
+                tempList = group.EnemyGroupAttr.ActiveCharacters;
+            else
+                tempList = group.MyGroupAttr.ActiveCharacters;
+
+            for (int i = 0; i < tempList.Count; i++)
+            {
+                if (H60CharacterUtil.IsBoss(tempList[i]) && !tempList[i].isDie())
+                    return tempList[i];
+            }
+            return null;
+        }
+
+        private int GetActiveEnemyCount()
+        {
+            int activeCount = 0;
+
+            List<H60Character> characters = null;
+
+            if (entity.CharAttr.myChar)
+                characters = group.EnemyGroupAttr.ActiveCharacters;
+            else
+                characters = group.MyGroupAttr.ActiveCharacters;
+
+            for(int i = 0; i < characters.Count; i++)
+            {
+                if (H60BattleLogic.isDie(characters[i]) == true)
+                    continue;
+
+                activeCount++;
+            }
+
+            return activeCount;
+        }
+
+        private H60Character SearchAttackDistanceEnemy()
+        {
+            H60Character tempEnemy = null;
+
+            if (entity.CharAttr.myChar)
+            {
+                if (group.EnemyGroupAttr.ActiveCharacters.Count > 0)
+                {
+                    H60Character firstEnemyGround = null;
+
+                    for (int i = 0; i < group.EnemyGroupAttr.ActiveCharacters.Count; i++)
+                    {
+                        tempEnemy = group.EnemyGroupAttr.ActiveCharacters[i];
+
+                        if (tempEnemy.IsHideTarget())
+                            continue;
+
+                        if (firstEnemyGround == null && H60CharacterUtil.isAirCharacter(tempEnemy.CharAttr.charData) == false)
+                        {
+                            firstEnemyGround = tempEnemy;
+                        }
+
+                        if (H60BattleLogic.isAttackDistancePossible(entity, tempEnemy, H60SkillType.Normal, false))
+                            return tempEnemy;
+                    }
+
+                    // melee일 경우 자기 앞의 캐릭터를 검사한다.
+                    if (firstEnemyGround != null && firstEnemyGround.isDie() == false)
+                    {
+                        H60Character checkChar = CheckBattleOrderPos(H60CharacterUtil.isMeleeAttack(entity.CharAttr.charData));
+         
+                        if (checkChar != null)
+                        {
+                            Entity fsmCheckAttSelTarget = checkChar.FSM.GetAttackTarget();
+                            if (fsmCheckAttSelTarget != null && firstEnemyGround.UniqueId == fsmCheckAttSelTarget.UniqueId)
+                                return firstEnemyGround;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (group.MyGroupAttr.ActiveCharacters.Count > 0)
+                {
+                    for (int i = 0; i < group.MyGroupAttr.ActiveCharacters.Count; i++)
+                    {
+                        tempEnemy = group.MyGroupAttr.ActiveCharacters[i];
+
+                        if (tempEnemy.IsHideTarget())
+                            continue;
+
+                        if (H60BattleLogic.isAttackDistancePossible(entity, tempEnemy, H60SkillType.Normal, false))
+                            return tempEnemy;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+
+        private H60Character SearchAttackDistanceEnemyWorldBoss()
+        {
+            if (entity.CharAttr.myChar)
+                return null;
+
+            H60Character tempEnemy = null;
+
+            // 월드 보스가 타겟을 찾을때만 사용한다.
+            if (group.MyGroupAttr.ActiveCharacters.Count > 0)
+            {
+                for (int i = 0; i < group.MyGroupAttr.ActiveCharacters.Count; i++)
+                {
+                    tempEnemy = group.MyGroupAttr.ActiveCharacters[i];
+
+                    float charAttackDistance = H60CharacterUtil.GetChar_AttackDistance(entity.CharAttr.charData);
+                    charAttackDistance *= H60CharacterUtil.GetChar_SkillRangeWeight(entity.CharAttr.charData, H60SkillType.Normal);
+                    float subDistance = entity.GetDistanceBodyExclude(tempEnemy, H60ModelManager.Instant.mlGame.BattleType);
+
+                    if (charAttackDistance >= subDistance)
+                        return tempEnemy;
+                }
+            }
+
+            return null;
+        }
+
+        private int SearchGroundEnemyCount()
+        {
+            List<H60Character> tempList;
+
+            if (entity.CharAttr.myChar)
+                tempList = group.EnemyGroupAttr.ActiveCharacters;
+            else
+                tempList = group.MyGroupAttr.ActiveCharacters;
+
+            int count = 0;
+
+            for (int i = 0; i < tempList.Count; i++)
+            {
+                if (H60CharacterUtil.isAirCharacter(tempList[i]))
+                    continue;
+
+                count++;
+            }
+
+            return count;
+        }
+
+        private H60TimeStone SearchAttackDistanceTimeStone()
+        {
+            H60TimeStone tempEnemy = SearchEnemyTimeStone();
+
+            if (tempEnemy != null)
+            {
+                if (H60BattleLogic.isAttackDistancePossible(entity, tempEnemy, H60SkillType.Normal, false))
+                    return tempEnemy;
+            }
+
+            return null;
+        }
+
+        private H60TimeStone SearchEnemyTimeStone()
+        {
+            H60TimeStone tempEnemy = null;
+
+            H60BattleType mainBattleType = H60ModelManager.Instant.mlGame.MainBattleType;
+            if (mainBattleType != H60BattleType.MainBattle)
+                return null;
+
+            if (entity.CharAttr.myChar)
+            {
+                if (group.EnemyGroupAttr.TimeStone != null)
+                {
+                    if ((mainBattleType == H60BattleType.MainBattle && H60ModelManager.Instant.mlGame.IsBossStage) == false &&
+                        mainBattleType != H60BattleType.ChallengeBossBattle)
+                    {
+                        if (group.EnemyGroupAttr.TimeStone.isDie() == false)
+                        {
+                            tempEnemy = group.EnemyGroupAttr.TimeStone;
+                        }
+                    }
+                }
+            }
+
+            return tempEnemy;
+        }        
+
+        #endregion ( Search Function. )
+
+        //---------------------------------------------------
+        // State Funtion.
+        #region ( State Funtion. )
+
+        protected override void StateEnterMove()
+        {
+            if (entity.CharAttr.myChar)
+                entity.SetLeftToRight(true);
+            else
+                entity.SetLeftToRight(false);
+
+            if (H60BattleLogic.isDie(NormalAttackEnemy))
+            {
+                NormalAttackEnemy = null;
+            }
+
+            if (H60BattleLogic.isDie(Enemy))
+            {
+                Enemy = null;
+            }
+
+            base.StateEnterMove();
+        }
+
+        protected virtual void UpdateSpawnState(float fElapsed, GameSpeedType xSpeed)
+        {
+            ChangeState(EntityState.Move);
+        }
+
+        protected virtual void UpdateHeroIdleState(float fElapsed, GameSpeedType xSpeed)
+        {
+            if (BattleFinish)
+                return;
+
+            if (stateTimer.isFinish() == false)
+                return;
+
+            stateTimer.Reset();
+
+            Vector3 localPos = entity.GetPosition();
+
+            Entity timeStoneEntity = null, ourEntity = null, targetEntity = null;
+            Vector3 timeStonePos = Vector3.zero, ourPos = Vector3.zero, targePos = Vector3.zero;
+
+            timeStoneEntity = group.MyGroupAttr.TimeStone;
+            if (H60BattleLogic.isDie(timeStoneEntity))
+                return;
+
+            if (group.MyGroupAttr.ActiveCharacters.Count > 0)
+                ourEntity = group.MyGroupAttr.ActiveCharacters[0];
+            if (group.EnemyGroupAttr.ActiveCharacters.Count > 0)
+                targetEntity = group.EnemyGroupAttr.ActiveCharacters[0];
+
+            if (timeStoneEntity != null)
+                timeStonePos = timeStoneEntity.GetPosition();
+            if (ourEntity != null)
+                ourPos = ourEntity.GetPosition();
+            if (targetEntity != null)
+                targePos = targetEntity.GetPosition();
+
+            // 타임스톤 위치를 먼저 구한다.
+            if (localPos.x <= timeStonePos.x - RUNAWAY_TIMESTONE_OFFSET)
+                return;
+
+            // 아군이 있을 때...
+            if (ourEntity != null)
+            {
+                // 적군이 없을 때...
+                if (targetEntity == null)
+                {
+                    // 적군의 timestone을 구한다.
+                    Entity enemyTimeStone = group.EnemyGroupAttr.TimeStone;
+                    if (enemyTimeStone == null)
+                    {
+                        return;
+                    }
+
+                    Vector3 enemyTimeStonePos = enemyTimeStone.GetPosition();
+                    if (enemyTimeStonePos.x - localPos.x > HERO_DIST)
+                    {
+                        ChangeState(EntityState.Move);
+                        return;
+                    }
+                }
+                else
+                {
+                    if (targePos.x - localPos.x > HERO_DIST)
+                    {
+                        ChangeState(EntityState.Move);
+                        return;
+                    }
+                }
+            }
+
+            //----------------------------------------------
+            // 도망가기를 해야 하는지를 구한다.
+
+            // 적의 위치를 구한다.
+            if (targetEntity != null)
+            {
+                // 도망치기 위치 체크이면....
+                if (localPos.x >= targePos.x - RUNAWAY_CHECK_DIST)
+                {
+                    runAwayPos = targePos;
+                    runAwayPos.x -= HERO_DIST;
+
+                    // 타임스톤을 구한다.
+                    if (runAwayPos.x < timeStonePos.x + RUNAWAY_TIMESTONE_OFFSET)
+                    {
+                        runAwayPos.x = timeStonePos.x - RUNAWAY_TIMESTONE_OFFSET;
+                    }
+
+                    ChangeState(EntityState.RunAway);
+                    return;
+                }
+            }
+        }
+
+        protected virtual void UpdateUnitMoveState(float fElapsed, GameSpeedType xSpeed)
+        {
+            if (H60BattleLogic.isDie(NormalAttackEnemy))
+            {
+                NormalAttackEnemy = null;
+            }
+
+            if (H60BattleLogic.isDie(Enemy))
+            {
+                Enemy = null;
+            }
+
+            if (H60ModelManager.Instant.mlGame.MainBattleType != H60BattleType.MainBattle)
+            {
+                // 적이 없으면.
+                int actEnemyCount = GetActiveEnemyCount();
+                if (actEnemyCount <= 0)
+                {
+                    ChangeState(EntityState.Idle);
+                    return;
+                }
+            }
+
+            float frontMeleeDistWeight = 1.0f;
+
+            // 앞에 melee character가 없으면 제자리 달린다.
+            if (entity.CharAttr.myChar == true && H60CharacterUtil.isMeleeAttack(entity.CharAttr.charData) == false)
+            {
+                H60Character frontMeleeChar = GetFrontMeleeCharacter();
+                if (frontMeleeChar != null)
+                {
+                    Vector3 localPos = entity.GetPosition();
+                    Vector3 frontPos = frontMeleeChar.GetPosition();
+                    if (frontPos.x - localPos.x < 70.0f)
+                        frontMeleeDistWeight = 0.3f;
+                }
+            }
+            
+            NormalAttackEnemy = GetAttackEnemy() ?? NormalAttackEnemy;
+
+            float meleeAdjustDist = 0.0f;
+            if (NormalAttackEnemy != null)
+            {
+                // 전투 싸우는 위치 보정.
+                int myTeamMeleeCount = GetMyTeamMeleeCount();
+                if (myTeamMeleeCount > 1)
+                {
+                    meleeAdjustDist = 10.0f * (myTeamMeleeCount - entity.CharAttr.battleSpaceOrder - 1);
+                }
+            }
+
+            if (NormalAttackEnemy != null)
+            {
+                useSkillType = H60SkillType.Normal;
+                if (NormalAttackEnemy.EntityType != EntityType.TimeStone)
+                {
+                    if (H60BattleLogic.isSkillUsePossible(entity))
+                    {
+                        // skill rule에 대한 타겟을 찾는다.
+                        if (NormalAttackEnemy.EntityType == EntityType.Character)
+                            Enemy = SearchSkillRuleTargetEntity(H60SkillType.Active, false);
+
+                        if (Enemy == null)
+                            Enemy = NormalAttackEnemy;
+
+                        if (Enemy != null && Enemy.EntityType != EntityType.TimeStone)
+                        {
+                            useSkillType = H60SkillType.Active;
+                            ChangeState(EntityState.Skill);
+                            return;
+                        }
+                    }
+                }
+
+                if (useSkillType == H60SkillType.Normal)
+                {
+                    Enemy = NormalAttackEnemy;
+                    SetAttackWaitTime(H60PAM.Instant.GetMBCharacterSkillWaitTime());
+                    ChangeState(EntityState.Attack);
+                    return;
+                }
+            }
+
+            if (state == EntityState.Move || state == EntityState.OneTargetMove)
+            {
+                Vector3 deltaPos = Vector3.right * H60BattleLogic.GetPixelPerMoveSpeed(entity) * fElapsed;
+                Vector3 localPos = entity.GetPosition();
+
+                // 슬로우 버프를 적용한다.
+                float slowBuffRatio = GetSlowBuffRatio();
+                deltaPos = deltaPos * slowBuffRatio;
+                entity.Resource.monoSpine.SetAnimTimeScale(currTimeScale * slowBuffRatio);
+
+                // 나의 캐릭터이고, 근거리 캐릭터이면.
+                // 적을 넘어서 이동하는지를 check한다.
+                if (H60PAM.Instant.GetMeleeCharMoveEnemyCheck() || IsBossStageMoveCheck())
+                {
+                    if (entity.CharAttr.myChar &&
+                        (H60CharacterUtil.isMeleeAttack(entity.CharAttr.charData)
+                        || H60CharacterUtil.isHeroCharacter(entity.CharAttr.charData)))
+                    {
+                        Vector2 sourceBodySize = entity.GetBodySize();
+                        float bodySourceHalfW = sourceBodySize.x / 2.0f;
+                        float charAttackDistance = H60CharacterUtil.GetChar_AttackDistance(entity.CharAttr.charData);
+
+                        if (group.EnemyGroupAttr.ActiveCharacters.Count > 0)
+                        {
+                            H60Character overMoveEnemy;
+                            for (int i = 0; i < group.EnemyGroupAttr.ActiveCharacters.Count; i++)
+                            {
+                                overMoveEnemy = group.EnemyGroupAttr.ActiveCharacters[i];
+                                if (H60CharacterUtil.isAirCharacter(overMoveEnemy.CharAttr.charData))
+                                    continue;
+
+                                if (H60BattleLogic.isDie(overMoveEnemy))
+                                    continue;
+
+                                Vector3 overMoveEnemyPos = overMoveEnemy.GetPosition();
+                                Vector2 targetBodySize = overMoveEnemy.GetBodySize();
+                                float bodyTargetHalfW = targetBodySize.x / 2.0f;
+
+                                float checkMoveDistance = bodySourceHalfW + bodyTargetHalfW + charAttackDistance;
+                                if (localPos.x + checkMoveDistance > overMoveEnemyPos.x)
+                                    continue;
+
+                                // 이동할 delta pos를 보정해 준다.
+                                if (localPos.x + deltaPos.x + checkMoveDistance > overMoveEnemyPos.x)
+                                {
+                                    deltaPos.x = overMoveEnemyPos.x - localPos.x - checkMoveDistance;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 좌표를 이동한다.
+                if (entity.CharAttr.leftToRight)
+                    localPos += (deltaPos * frontMeleeDistWeight);
+                else
+                    localPos -= (deltaPos * frontMeleeDistWeight);
+
+                entity.SetPosition(localPos);
+            }
+
+            H60TimeStone enemyTimeStone = SearchEnemyTimeStone();
+            if (enemyTimeStone != null && enemyTimeStone.EntityType == EntityType.TimeStone)
+            {
+                Vector3 localPos = entity.GetPosition();
+                float charAttackDistance = H60CharacterUtil.GetChar_AttackDistance(entity.CharAttr.charData);
+                Vector2 entityBodySize = entity.GetBodySize();
+                Vector2 timeStoneBodySize = enemyTimeStone.GetBodySize();
+                charAttackDistance += (entityBodySize.x / 2.0f + timeStoneBodySize.x / 2.0f);
+
+                Vector3 timeStonePos = enemyTimeStone.GetPosition();
+
+                if (entity.CharAttr.myChar)
+                {
+                    if (localPos.x + charAttackDistance >= timeStonePos.x)
+                    {
+                        localPos.x = timeStonePos.x - charAttackDistance;
+                        entity.SetPosition(localPos);
+                    }
+                }
+                else
+                {
+                    if (localPos.x - charAttackDistance <= timeStonePos.x)
+                    {
+                        localPos.x = timeStonePos.x + charAttackDistance;
+                        entity.SetPosition(localPos);
+                    }
+                }
+            }
+        }
+
+        protected virtual void UpdateUnitDeathPosMoveState(float fElapsed, GameSpeedType xSpeed)
+        {
+            Vector3 deltaPos = Vector3.right * H60BattleLogic.GetPixelPerMoveSpeed(entity) * fElapsed;
+            Vector3 localPos = entity.GetPosition();
+
+            // 슬로우 버프를 적용한다.
+            float slowBuffRatio = GetSlowBuffRatio();
+            deltaPos = deltaPos * slowBuffRatio;
+            entity.Resource.monoSpine.SetAnimTimeScale(currTimeScale * slowBuffRatio);
+
+            // 이동할 delta pos를 보정해 준다.
+            if (localPos.x + deltaPos.x > entity.CharAttr.revivalDeathPos.x)
+            {
+                deltaPos.x = entity.CharAttr.revivalDeathPos.x - localPos.x;
+                entity.CharAttr.isMoveDeathPos = false;
+            }
+
+            localPos += deltaPos;
+            entity.SetPosition(localPos);
+        }
+
+        private bool IsBossStageMoveCheck()
+        {
+            BS_BASE_STAGE_INFO tableStageInfo = CStageInfo_Manager.Instance.GetInfo(H60ModelManager.Instant.mlGame.PlayStage);
+
+            if (tableStageInfo == null)
+                return false;
+
+            return (H60PAM.Instant.GetMeleeCharMoveEnemyCheckBossStage() && tableStageInfo.Boss_Stage);
+        }
+
+        protected virtual void UpdateHeroMoveState(float fElapsed, GameSpeedType xSpeed)
+        {
+            // 앞에 아군의 캐릭터가 있는가?
+            if (state == EntityState.Move)
+            {
+                Vector3 deltaPos = Vector3.right * (H60BattleLogic.GetPixelPerMoveSpeed(entity) * fElapsed);
+                Vector3 localPos = entity.GetPosition();
+
+                if (entity.CharAttr.leftToRight)
+                    localPos += deltaPos;
+                else
+                    localPos -= deltaPos;
+                entity.SetPosition(localPos);
+
+                Entity targetEntity = null;
+                if (group.EnemyGroupAttr.ActiveCharacters.Count > 0)
+                    targetEntity = group.EnemyGroupAttr.ActiveCharacters[0];
+                else
+                {
+                    if (group.EnemyGroupAttr.TimeStone != null)
+                        targetEntity = group.EnemyGroupAttr.TimeStone;
+                }
+
+                Vector3 targePos = targetEntity.GetPosition();
+                if (localPos.x >= targePos.x - HERO_DIST)
+                {
+                    ChangeState(EntityState.Idle);
+                }
+            }
+        }
+
+        protected virtual void UpdateHeroRunAwayState(float fElapsed, GameSpeedType xSpeed)
+        {
+            Vector3 deltaPos = Vector3.right * (H60BattleLogic.GetPixelPerMoveSpeed(entity) * fElapsed * 4.0f);
+            Vector3 localPos = entity.GetPosition();
+
+            if (entity.CharAttr.leftToRight)
+                localPos += deltaPos;
+            else
+                localPos -= deltaPos;
+            entity.SetPosition(localPos);
+
+            if (localPos.x <= runAwayPos.x)
+            {
+                localPos = runAwayPos;
+                entity.SetLeftToRight(true);
+
+                ChangeState(EntityState.Idle);
+            }
+        }
+
+        protected virtual void UpdateHeroBackAwayState(float fElapsed, GameSpeedType xSpeed)
+        {
+            Vector3 deltaPos = Vector3.right * (H60BattleLogic.GetConfusionPixelPerMoveSpeed(entity) * fElapsed * 1.5f);
+            Vector3 localPos = entity.GetPosition();
+
+            if (entity.CharAttr.myChar == true)
+                localPos -= deltaPos;
+            else
+                localPos += deltaPos;
+            entity.SetPosition(localPos);
+
+            if (stateTimer.isFinish())
+            {
+                ChangeState(EntityState.Move);
+            }
+        }
+
+        protected virtual void UpdateAttackWaitState(float fElapsed, GameSpeedType xSpeed)
+        {
+            if (stateTimer.isFinish())
+            {
+                bool isAttack = false;
+                bool checkNormalAttack = true;
+   
+                if (NormalAttackEnemy != null && NormalAttackEnemy.EntityType == EntityType.TimeStone)
+                {
+                    checkNormalAttack = false;
+                }
+
+                 if (H60BattleLogic.isDie(NormalAttackEnemy))
+                    NormalAttackEnemy = null;
+                if (H60BattleLogic.isDie(Enemy))
+                    Enemy = null;
+
+                if (checkNormalAttack == true && NormalAttackEnemy != null)
+                {
+                    isAttack = true;
+                }
+
+                if (isAttack == false)
+                {
+                    if (H60ModelManager.Instant.mlGame.FormulaBattleType == H60BattleType.WorldBoss &&
+                        entity.CharAttr.myChar == false)
+                    {
+                        // 월드 보스 컨텐츠에서 보스이면, 적을 찾을때까지 아무 반을을 안한다.
+                        H60Character tempChar = SearchAttackDistanceEnemyWorldBoss();
+                        if (tempChar != null)
+                        {
+                            NormalAttackEnemy = tempChar;
+                            isAttack = true;
+                        }
+                    }
+                    else
+                    {
+                        H60Character tempChar = SearchAttackDistanceEnemy();
+                        if (tempChar == null)
+                        {
+                            ChangeState(EntityState.Move);
+                        }
+                        else
+                        {
+                            NormalAttackEnemy = tempChar;
+                            isAttack = true;
+                        }
+                    }
+                }
+
+                if (isAttack)
+                {
+                    useSkillType = H60SkillType.Normal;
+                    if (H60BattleLogic.isSkillUsePossible(entity))
+                    {
+                        // skill rule에 대한 타겟을 찾는다.
+                        if (NormalAttackEnemy.EntityType == EntityType.Character)
+                        {
+                            Enemy = SearchSkillRuleTargetEntity(H60SkillType.Active, false);
+                            if (Enemy == null)
+                                Enemy = NormalAttackEnemy;
+                        }
+
+                        if (Enemy != null && Enemy.EntityType != EntityType.TimeStone)
+                        {
+                            useSkillType = H60SkillType.Active;
+                            ChangeState(EntityState.Skill);
+                        }
+                    }
+
+                    if (useSkillType == H60SkillType.Normal)
+                    {
+                        Enemy = NormalAttackEnemy;
+                        stateTimer.Reset();
+                        ChangeState(EntityState.Attack);
+                    }
+                }
+            }
+        }
+
+        protected virtual void UpdateAttackState(float fElapsed, GameSpeedType xSpeed)
+        {
+            if (H60BattleLogic.isSkillUsePossible(entity))
+            {
+                Entity searchEnemy = SearchSkillRuleTargetEntity(H60SkillType.Active, false);
+
+                if (searchEnemy != null && searchEnemy.EntityType != EntityType.TimeStone)
+                {
+                    NormalAttackEnemy = searchEnemy;
+                    Enemy = NormalAttackEnemy;
+
+                    useSkillType = H60SkillType.Active;
+                    ChangeState(EntityState.Skill);
+                }
+            }
+        }
+
+        protected virtual void UpdateDieState(float fElapsed, GameSpeedType xSpeed)
+        {
+            if (stateTimer.isFinish())
+            {
+                ChangeState(EntityState.Delete);
+            }
+        }
+
+        protected virtual void UpdateDeleteState(float fElapsed, GameSpeedType xSpeed)
+        {
+            if (stateTimer.isFinish())
+            {
+                ChangeState(EntityState.RespawnWait);
+            }
+        }
+
+        protected virtual void UpdateRespawnTime(float fElapsed, GameSpeedType xSpeed)
+        {
+        }
+
+
+        #endregion ( State Funtion. )
+
+        //---------------------------------------------------
+        // Private Funtion.
+        #region ( Private Funtion. )
+        // TODO 레이드, 던전, PVP등 기타 컨텐츠들은
+        protected override Entity GetHideAttackTarget()
+        {
+            if (H60ModelManager.Instant.mlGame.MainBattleType != H60BattleType.MainBattle)
+                return null;
+
+            var target = SearchEnemyTimeStone();
+
+            return target;
+        }
+
+        private Entity GetHideAttackTargetDistance()
+        {
+            var target = SearchEnemyTimeStone();
+            if ((null != target) && H60BattleLogic.isAttackDistancePossible(entity, target, H60SkillType.Normal, false))
+                return target;
+
+            return null;
+        }
+
+        private Entity GetAttackEnemy()
+        {
+            return (Entity)SearchAttackDistanceEnemy() ?? (Entity)SearchAttackDistanceTimeStone();
+        }
+             
+        #endregion ( Private Funtion. )
+
+        //---------------------------------------------------
+        // Public Funtion.
+        #region ( Public Funtion. )
+
+        public override void Enter(H60Character h60Char)
+        {
+            base.Enter(h60Char);
+
+            group = MBattleScene.Instant.Group;
+        }
+
+        public override void Exit()
+        {
+            base.Exit();
+        }
+
+        public override void UpdateFrame(float fElapsed, GameSpeedType xSpeed, float finalGameSpeedValue)
+        {
+            if (fElapsed == 0.0f)
+                return;
+
+            base.UpdateFrame(fElapsed, xSpeed, finalGameSpeedValue);
+
+            switch (state)
+            {
+                case EntityState.Spawn:
+                    {
+                        UpdateSpawnState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.Idle:
+                    {
+                    }
+                    break;
+
+                case EntityState.Move:
+                    {
+                        BS_DATA.CharacterType unitType = entity.CharAttr.charData.table.Type;
+
+                        if (entity.CharAttr.isMoveDeathPos == true)
+                            UpdateUnitDeathPosMoveState(fElapsed, xSpeed);
+                        else
+                            UpdateUnitMoveState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.RunAway:
+                    {
+                        BS_DATA.CharacterType unitType = entity.CharAttr.charData.table.Type;
+                        if (unitType == BS_DATA.CharacterType.HERO)
+                            UpdateHeroRunAwayState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.BackAway:
+                    {
+                        BS_DATA.CharacterType unitType = entity.CharAttr.charData.table.Type;
+                        if (unitType == BS_DATA.CharacterType.HERO)
+                            UpdateHeroBackAwayState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.AttackWait:
+                    {
+                        UpdateAttackWaitState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.Attack:
+                    {
+                        UpdateAttackState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.Knockback:
+                    {
+                        UpdateKncokbackState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.Confusion:
+                    {
+                        UpdateConfusionState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.Die:
+                    {
+                        UpdateDieState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.Delete:
+                    {
+                        UpdateDeleteState(fElapsed, xSpeed);
+                    }
+                    break;
+
+                case EntityState.RespawnWait:
+                    break;
+
+                case EntityState.OneTargetMove:
+                    {
+                        UpdateUnitMoveState(fElapsed, xSpeed);
+                    }
+                    break;
+            }
+        }
+
+        public override void ChangeState(EntityState newState)
+        {
+            H60UIActionManager.Instant.ActionCharacterChangeStateFuncEnter(entity, newState);
+
+            // 이전 state
+            switch (state)
+            {
+                case EntityState.Skill:
+                    StateExitSkill();
+                    break;
+            }
+
+            // 다음 state
+            switch (newState)
+            {
+                case EntityState.Spawn:
+                    {
+                        StateEnterSpawn();
+                    }
+                    break;
+
+                case EntityState.Idle:
+                    {
+                        StateEnterIdle();
+                    }
+                    break;
+
+                case EntityState.Move:
+                    {
+                        StateEnterMove();
+                    }
+                    break;
+
+                case EntityState.RunAway:
+                    {
+                        if (entity.CharAttr.myChar)
+                            entity.SetLeftToRight(false);
+                        else
+                            entity.SetLeftToRight(true);
+
+                        NormalAttackEnemy = null;
+                        Enemy = null;
+
+                        ChangeAnim(EntityDefine.CHAR_ANIM_MOVE, true, 1.0f);
+                    }
+                    break;
+
+                case EntityState.BackAway:
+                    {
+                        NormalAttackEnemy = null;
+                        Enemy = null;
+
+                        int randValueR = Random.Range(0, 3);
+                        if (randValueR == 0)
+                            ChangeAnim(EntityDefine.CHAR_ANIM_AVOID_GUARD, true, 1.0f);
+                        else if (randValueR == 1)
+                            ChangeAnim(EntityDefine.CHAR_ANIM_AVOID_SLIDE, true, 1.0f);
+                        else
+                            ChangeAnim(EntityDefine.CHAR_ANIM_MOVE_BACK, true, 1.0f);
+
+                        stateTimer.StartTimer(0.7f);
+                    }
+                    break;
+
+                case EntityState.Attack:
+                    {
+                        StateEnterAttack();
+                    }
+                    break;
+
+                case EntityState.AttackWait:
+                    {
+                        StateEnterAttackWait();
+                    }
+                    break;
+
+                case EntityState.Skill:
+                    {
+                        StateEnterSkill();
+                    }
+                    break;
+
+                case EntityState.Knockback:
+                    {
+                        StateEnterKnockback();
+                    }
+                    break;
+
+                case EntityState.Stun:
+                    {
+                        StateEnterStun();
+                    }
+                    break;
+
+                case EntityState.Freezing:
+                    {
+                        StateEnterFreezing();
+                    }
+                    break;
+
+                case EntityState.Confusion:
+                    {
+                        StateEnterFreezing();
+                    }
+                    break;
+
+                case EntityState.Bowing:
+                    {
+                        StateEnterBowing();
+                    }
+                    break;
+
+                case EntityState.MussangHurt:
+                    {
+                        StateEnterMussangHurt();
+                    }
+                    break;
+
+                case EntityState.Die:
+                    {
+                        StateEnterDie();
+                    }
+                    break;
+
+                case EntityState.Delete:
+                    {
+                        StateEnterDelete();
+                    }
+                    break;
+
+                case EntityState.RespawnWait:
+                    {
+                        entity.RemoveChildAll();
+                        stateTimer.StartTimer(1.0f);
+                        group.NotifyRespawnWait(entity);
+                    }
+                    break;
+
+                case EntityState.OneTargetMove:
+                    {
+                        base.StateEnterMove();
+                    }
+                    break;
+            }
+
+            base.ChangeState(newState);
+
+            H60UIActionManager.Instant.ActionCharacterChangeStateFuncExit(entity, newState);
+        }
+
+        #endregion ( Public Funtion. )
+
+        //---------------------------------------------------
+        // Public Funtion.
+        #region ( Public Funtion. )
+
+        public override List<H60Character> GetAttackValidEnemyList(H60BattleType battleType, Vector3 startPos, bool leftToRight, float attackDistance)
+        {
+            if (entity.CharAttr.myChar)
+                return MBattleScene.Instant.Group.EnemyGroupAttr.ActiveCharacters;
+            else
+                return MBattleScene.Instant.Group.MyGroupAttr.ActiveCharacters;
+        }
+
+        public override H60WorldTarget GetCameraWorldTargetEntity()
+        {
+            return group.GetCameraWorldTargetEntity();
+        }
+
+        #endregion ( Public Funtion. )
+
+        //---------------------------------------------------
+        // UI Function.
+        #region ( UI Function. )
+
+        public override bool OnUIGodSpecialSkillCkick(int skillIndex)
+        {
+        	//세력 스킬 사용 컨텐츠 조건
+            switch(H60ModelManager.Instant.mlGame.MainBattleType)
+            {
+                case H60BattleType.MainBattle:
+                case H60BattleType.ChallengeBossBattle:
+                    break;
+
+                default:
+                    return false;
+            }
+
+            if (userInputSpecialSkills.Contains(skillIndex))
+                return true;
+
+            List<int> specialSkills = H60BattleLogic.GetValidGodSpecialSkill(entity);
+            if (specialSkills == null || specialSkills.Count == 0)
+                return false;
+
+            if (specialSkills.Contains(skillIndex) == false)
+                return false;
+
+            userInputSpecialSkills.Add(skillIndex);
+
+            return true;
+        }
+
+        #endregion ( UI Function. )
+    }
+}
